@@ -1,0 +1,41 @@
+{
+  "pipeline_name": "portable bundled sample validation",
+  "output_root": "..\\validation_output",
+  "date_range": {
+    "from": "2026-03-02",
+    "to": "2026-03-02"
+  },
+  "input_patterns": {
+    "sta": "..\\sample_data\\STA_OK_{date}.dat",
+    "pos": "..\\sample_data\\POS_OK_{date}.dat"
+  },
+  "tanker_classification": {
+    "policy": "any_observed",
+    "ship_types": [80, 81, 82, 83, 84, 89]
+  },
+  "sampling": {
+    "timezone": "UTC",
+    "hours": [0, 3, 6, 9, 12, 15, 18, 21],
+    "tolerance_seconds": 1800,
+    "require_complete_window": false
+  },
+  "quality": {
+    "exclude_zero_zero": true
+  },
+  "duckdb": {
+    "memory_limit": "1GB",
+    "threads": 2,
+    "temp_directory": "..\\validation_output\\_tmp"
+  },
+  "export_csv_on_run": true,
+  "heatmap_on_run": true,
+  "heatmap": {
+    "metric": "sample_count",
+    "extent": [110.0, 120.0, 25.0, 35.0],
+    "bin_size_degrees": 0.25,
+    "colormap": "inferno",
+    "dpi": 140,
+    "figure_size_inches": [8, 6]
+  }
+}
+

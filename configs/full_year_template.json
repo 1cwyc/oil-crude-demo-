@@ -1,0 +1,41 @@
+{
+  "pipeline_name": "AIS tanker full-year template",
+  "output_root": "D:\\AIS_OUTPUT\\tanker_2025",
+  "date_range": {
+    "from": "2025-01-01",
+    "to": "2025-12-31"
+  },
+  "input_patterns": {
+    "sta": "D:\\AIS_DATA\\{year}\\{yyyymm}\\STA\\STA_OK_{date}.dat",
+    "pos": "D:\\AIS_DATA\\{year}\\{yyyymm}\\POS\\POS_OK_{date}.dat"
+  },
+  "tanker_classification": {
+    "policy": "any_observed",
+    "ship_types": [80, 81, 82, 83, 84, 89]
+  },
+  "sampling": {
+    "timezone": "UTC",
+    "hours": [0, 3, 6, 9, 12, 15, 18, 21],
+    "tolerance_seconds": 1800,
+    "require_complete_window": false
+  },
+  "quality": {
+    "exclude_zero_zero": true
+  },
+  "duckdb": {
+    "memory_limit": "12GB",
+    "threads": 4,
+    "temp_directory": "D:\\AIS_OUTPUT\\tanker_2025\\_tmp"
+  },
+  "export_csv_on_run": false,
+  "heatmap_on_run": true,
+  "heatmap": {
+    "metric": "sample_count",
+    "extent": [-180.0, 180.0, -90.0, 90.0],
+    "bin_size_degrees": 0.5,
+    "colormap": "inferno",
+    "dpi": 220,
+    "figure_size_inches": [14, 7]
+  }
+}
+

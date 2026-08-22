@@ -1,0 +1,91 @@
+# Python bytecode, caches, and test artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local Python environments and package builds
+.venv/
+venv/
+env/
+ENV/
+build/
+dist/
+*.egg-info/
+
+# Editors and operating-system metadata
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+
+# Logs, temporary files, and local caches
+*.log
+*.tmp
+*.bak
+logs/
+tmp/
+temp/
+cache/
+.cache/
+
+# Scrapy local runtime state (future ChinaPorts crawler)
+.scrapy/
+jobdir/
+httpcache/
+
+# Generated pipeline outputs and analytical databases
+output/
+outputs/
+validation_output/
+reports/
+*.parquet
+*.duckdb
+*.duckdb.wal
+*.db
+*.sqlite
+*.sqlite3
+*.arrow
+*.feather
+*.orc
+
+# Raw AIS files. Keep only the tiny committed fixtures in sample_data/.
+POS_OK_*.dat
+STA_OK_*.dat
+!sample_data/
+!sample_data/*.dat
+
+# Large local archives
+*.zip
+*.7z
+*.rar
+*.tar
+*.tar.gz
+*.tgz
+
+# Secrets and machine-specific credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+credentials*.json
+secrets*.json
+
+# Notebook checkpoints
+.ipynb_checkpoints/

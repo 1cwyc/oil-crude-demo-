@@ -1,0 +1,12 @@
+name: ais-tanker-pipeline
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - duckdb==1.5.5
+      - numpy==1.26.4
+      - matplotlib==3.11.1
+      - tzdata>=2025.2
+
