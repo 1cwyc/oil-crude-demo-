@@ -24,6 +24,7 @@ dist/
 # Editors and operating-system metadata
 .idea/
 .vscode/
+.worktrees/
 .DS_Store
 Thumbs.db
 Desktop.ini
@@ -44,6 +45,9 @@ cache/
 .scrapy/
 jobdir/
 httpcache/
+crawler_raw/
+cookies.json
+storage_state.json
 
 # Generated pipeline outputs and analytical databases
 output/

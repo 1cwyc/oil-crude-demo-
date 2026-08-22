@@ -1,0 +1,59 @@
+# oil-crude-demo
+
+面向宏观原油航次重建、月度海运贸易网络和关键通道约束研究的 AIS 数据处理项目。最终研究目标是在可复核的航次与网络基础上构建航路中断和改道的多目标优化模型。
+
+## 研究边界
+
+- 现有代码已实现油轮候选登记、全分辨率油轮位置筛选和三小时位置采样。
+- 后续模块将按独立 PRD 实现船舶身份、DWT 等级、吃水状态、港区、装卸事件、航次、SCPC 货量、月度网络和航路约束。
+- 三小时样本用于宏观航次重建；全分辨率位置用于高风险事件校准和抽查。
+- 仓库不包含真实 AIS、ChinaPorts 抓取响应或研究生成结果。
+
+## 当前能力
+
+```text
+STA .dat → 年度船舶/油轮登记
+POS .dat + 油轮登记 → 油轮位置
+油轮位置 → 三小时样本 → 可选 CSV/热力图
+```
+
+当前流程以 Python、DuckDB 和 Zstandard Parquet 为主。详细算法与限制见 [技术说明](docs/技术说明.md)。
+
+## 仓库导航
+
+- [Windows 运行说明](README_使用说明.md)
+- [模块输入、输出和字段索引](docs/MODULES.md)
+- [真实数据与输出边界](docs/DATA_BOUNDARIES.md)
+- [双主机交接步骤](docs/HANDOFF.md)
+- [贡献和 PR 工作流](CONTRIBUTING.md)
+- [数据字典与模块接口规格 v0.2](docs/specs/AIS原油海运网络_数据字典与模块接口规格_v0.2.md)
+
+## 合成数据快速自测
+
+Windows PowerShell：
+
+```powershell
+.\01_setup_environment.ps1
+.\04_run_self_test.ps1
+```
+
+也可以直接运行：
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe scripts\check_repository_safety.py --repo .
+```
+
+自测只读取 `sample_data/` 中的合成记录，并把结果写入临时目录。
+
+## 使用真实 AIS 数据
+
+将真实 POS/STA 和所有输出放在仓库外，通过复制配置模板并修改 `input_patterns`、`output_root` 和 `duckdb.temp_directory` 指向本机数据盘。运行前先执行只读的 `doctor` 和 `plan`；不要把真实路径写回版本化配置。
+
+## 开发与交接
+
+`main` 受 GitHub Ruleset 保护。所有变更通过任务分支和 Pull Request 完成；两台主机按 [HANDOFF.md](docs/HANDOFF.md) 顺序接力。业务模块必须先完成独立 PRD、实施计划和测试，再进入实现。
+
+## License
+
+代码以 [MIT License](LICENSE) 发布。第三方代码和数据仍受各自许可约束；本许可证不授予无权再分发的数据。
