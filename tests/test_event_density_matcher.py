@@ -405,6 +405,28 @@ class SpatialMatchTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     nearest_valid_value(grid, 0.0, 0.0, 75.0, valid_range)
 
+    def test_north_pole_same_point_tie_uses_smallest_longitude(self) -> None:
+        grid = GridSlice(
+            values=np.array([[41.0, 42.0, 43.0]], dtype=float),
+            latitudes=np.array([90.0]),
+            longitudes=np.array([-120.0, 20.0, 300.0]),
+        )
+        self.assertEqual(
+            nearest_valid_value(grid, 100.0, 90.0, 75.0, (0.0, 50.0)),
+            41.0,
+        )
+
+    def test_south_pole_same_point_tie_uses_smallest_longitude(self) -> None:
+        grid = GridSlice(
+            values=np.array([[44.0, 45.0, 46.0]], dtype=float),
+            latitudes=np.array([-90.0]),
+            longitudes=np.array([-120.0, 20.0, 300.0]),
+        )
+        self.assertEqual(
+            nearest_valid_value(grid, -100.0, -90.0, 75.0, (0.0, 50.0)),
+            44.0,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

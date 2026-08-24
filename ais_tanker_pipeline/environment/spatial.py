@@ -21,11 +21,12 @@ def haversine_km(
     lat_delta = np.radians(lat2 - lat1)
     lat1_rad = math.radians(lat1)
     lat2_rad = np.radians(lat2)
+    longitude_factor = math.cos(lat1_rad) * np.cos(lat2_rad)
+    at_pole = (abs(lat1) == 90.0) | (np.abs(lat2) == 90.0)
+    longitude_factor = np.where(at_pole, 0.0, longitude_factor)
     a = (
         np.sin(lat_delta / 2.0) ** 2
-        + math.cos(lat1_rad)
-        * np.cos(lat2_rad)
-        * np.sin(lon_delta / 2.0) ** 2
+        + longitude_factor * np.sin(lon_delta / 2.0) ** 2
     )
     return 2.0 * EARTH_RADIUS_KM * np.arcsin(np.minimum(1.0, np.sqrt(a)))
 
