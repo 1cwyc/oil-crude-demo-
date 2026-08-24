@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import math
 import os
 from pathlib import Path
 import time
@@ -43,6 +44,19 @@ REQUIRED_EVENT_TYPES = {
 }
 OUTPUT_COLUMNS = ["event_id", "seawater_density_kg_m3", "density_method"]
 OUTPUT_TYPES = ["VARCHAR", "DOUBLE", "VARCHAR"]
+_MANIFEST_KEYS = {
+    "status", "run_id", "module_name", "algorithm_version", "config_hash",
+    "input_fingerprint", "inputs", "output", "counts", "summary",
+    "gsw_version", "created_at_utc", "elapsed_seconds",
+}
+_RECORD_KEYS = {"path", "size_bytes", "mtime_ns", "sha256"}
+_COUNT_KEYS = {"rows", "teos10", "fixed_1025"}
+_SUMMARY_INT_KEYS = {
+    "rows", "duplicates", "invalid_event_id", "null_density", "invalid_density",
+    "teos10", "fixed_1025", "invalid_method",
+}
+_SUMMARY_OPTIONAL_FLOAT_KEYS = {"min_density", "median_density", "max_density"}
+_SUMMARY_KEYS = _SUMMARY_INT_KEYS | _SUMMARY_OPTIONAL_FLOAT_KEYS | {"fallback_fraction"}
 
 
 def event_parquet_files(config: DensityConfig) -> tuple[Path, ...]:
@@ -192,7 +206,7 @@ def _process_events(
     return sorted(results, key=lambda item: item.event_id)
 
 
-def _write_parquet_atomic(results: list[DensityResult], target: Path) -> None:
+def _write_parquet_partial(results: list[DensityResult], target: Path) -> Path:
     frame = pd.DataFrame(
         [(item.event_id, item.density_kg_m3, item.method) for item in results],
         columns=OUTPUT_COLUMNS,
@@ -217,7 +231,7 @@ def _write_parquet_atomic(results: list[DensityResult], target: Path) -> None:
             )
         finally:
             connection.close()
-        os.replace(temporary, target)
+        return temporary
     except BaseException:
         if temporary.exists():
             temporary.unlink()
@@ -280,12 +294,90 @@ def _output_record(path: Path) -> dict[str, Any]:
     return {**file_signature(path), "sha256": sha256_file(path)}
 
 
+def _is_sha256(value: object) -> bool:
+    return (
+        type(value) is str
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _is_record(value: object) -> bool:
+    if type(value) is not dict or set(value) != _RECORD_KEYS:
+        return False
+    return (
+        type(value["path"]) is str
+        and type(value["size_bytes"]) is int
+        and value["size_bytes"] >= 0
+        and type(value["mtime_ns"]) is int
+        and value["mtime_ns"] >= 0
+        and _is_sha256(value["sha256"])
+    )
+
+
+def _is_manifest(value: object) -> bool:
+    """Accept only manifests whose complete JSON shape can establish idempotency."""
+    if type(value) is not dict or set(value) != _MANIFEST_KEYS:
+        return False
+    if not (
+        value["status"] == "complete"
+        and value["module_name"] == "event_density_matcher"
+        and value["algorithm_version"] == ALGORITHM_VERSION
+        and type(value["run_id"]) is str
+        and bool(value["run_id"])
+        and _is_sha256(value["config_hash"])
+        and _is_sha256(value["input_fingerprint"])
+        and type(value["gsw_version"]) is str
+        and type(value["created_at_utc"]) is str
+        and type(value["elapsed_seconds"]) is float
+        and math.isfinite(value["elapsed_seconds"])
+        and value["elapsed_seconds"] >= 0.0
+        and type(value["inputs"]) is list
+        and all(_is_record(record) for record in value["inputs"])
+        and _is_record(value["output"])
+        and type(value["counts"]) is dict
+        and set(value["counts"]) == _COUNT_KEYS
+        and all(type(item) is int and item >= 0 for item in value["counts"].values())
+        and type(value["summary"]) is dict
+        and set(value["summary"]) == _SUMMARY_KEYS
+    ):
+        return False
+    summary = value["summary"]
+    if not all(type(summary[key]) is int and summary[key] >= 0 for key in _SUMMARY_INT_KEYS):
+        return False
+    if not (
+        type(summary["fallback_fraction"]) is float
+        and math.isfinite(summary["fallback_fraction"])
+        and 0.0 <= summary["fallback_fraction"] <= 1.0
+    ):
+        return False
+    return all(
+        summary[key] is None or (type(summary[key]) is float and math.isfinite(summary[key]))
+        for key in _SUMMARY_OPTIONAL_FLOAT_KEYS
+    )
+
+
+def _typed_equal(left: object, right: object) -> bool:
+    """Compare JSON values without Python's bool/int or int/float equivalence."""
+    if type(left) is not type(right):
+        return False
+    if type(left) is dict:
+        return set(left) == set(right) and all(
+            _typed_equal(left[key], right[key]) for key in left
+        )
+    if type(left) is list:
+        return len(left) == len(right) and all(
+            _typed_equal(item_left, item_right) for item_left, item_right in zip(left, right)
+        )
+    return left == right
+
+
 def _matching_output_summary(
     existing: dict[str, Any] | None,
     target: Path,
     config: DensityConfig,
 ) -> dict[str, int | float | None] | None:
-    if existing is None or not target.exists():
+    if not _is_manifest(existing) or not target.exists():
         return None
     try:
         counts = existing["counts"]
@@ -299,9 +391,9 @@ def _matching_output_summary(
             "fixed_1025": summary["fixed_1025"],
         }
         if (
-            existing.get("output") != _output_record(target)
-            or existing.get("counts") != actual_counts
-            or existing.get("summary") != summary
+            not _typed_equal(existing["output"], _output_record(target))
+            or not _typed_equal(existing["counts"], actual_counts)
+            or not _typed_equal(existing["summary"], summary)
         ):
             return None
     except (KeyError, TypeError, ValueError, OSError, duckdb.Error, RuntimeError):
@@ -335,16 +427,16 @@ def run_density_matcher(
     inputs = _input_records(input_paths)
     fingerprint = canonical_hash(inputs)
     existing = read_manifest(manifest_path)
+    manifest_is_valid = _is_manifest(existing)
     output_summary = _matching_output_summary(existing, target, config)
     existing_matches = (
-        existing is not None
-        and existing.get("status") == "complete"
-        and existing.get("algorithm_version") == ALGORITHM_VERSION
-        and existing.get("config_hash") == config.config_hash
-        and existing.get("input_fingerprint") == fingerprint
+        manifest_is_valid
+        and existing["config_hash"] == config.config_hash
+        and existing["input_fingerprint"] == fingerprint
+        and _typed_equal(existing["inputs"], inputs)
         and output_summary is not None
     )
-    if existing_matches:
+    if existing_matches and not force:
         return {
             "stage": "event_density_matcher",
             "action": "skipped",
@@ -362,33 +454,51 @@ def run_density_matcher(
     events = read_accepted_events(config)
     catalog = build_source_catalog(config)
     results = _process_events(events, catalog, config)
-    _write_parquet_atomic(results, target)
-    summary = validate_density_output(target, len(events), config.density_valid_range_kg_m3)
-    counts = {
-        "rows": summary["rows"],
-        "teos10": summary["teos10"],
-        "fixed_1025": summary["fixed_1025"],
-    }
-    manifest = {
-        "status": "complete",
-        "run_id": uuid.uuid4().hex,
-        "module_name": "event_density_matcher",
-        "algorithm_version": ALGORITHM_VERSION,
-        "config_hash": config.config_hash,
-        "input_fingerprint": fingerprint,
-        "inputs": inputs,
-        "output": _output_record(target),
-        "counts": counts,
-        "summary": summary,
-        "gsw_version": gsw.__version__,
-        "created_at_utc": datetime.now(timezone.utc).isoformat(),
-        "elapsed_seconds": round(time.perf_counter() - started, 3),
-    }
+    temporary = _write_parquet_partial(results, target)
+    backup: Path | None = None
+    publication_started = False
     try:
+        summary = validate_density_output(
+            temporary, len(events), config.density_valid_range_kg_m3
+        )
+        if target.exists():
+            backup = partial_path(target)
+            os.replace(target, backup)
+            publication_started = True
+        os.replace(temporary, target)
+        publication_started = True
+        counts = {
+            "rows": summary["rows"],
+            "teos10": summary["teos10"],
+            "fixed_1025": summary["fixed_1025"],
+        }
+        manifest = {
+            "status": "complete",
+            "run_id": uuid.uuid4().hex,
+            "module_name": "event_density_matcher",
+            "algorithm_version": ALGORITHM_VERSION,
+            "config_hash": config.config_hash,
+            "input_fingerprint": fingerprint,
+            "inputs": inputs,
+            "output": _output_record(target),
+            "counts": counts,
+            "summary": summary,
+            "gsw_version": gsw.__version__,
+            "created_at_utc": datetime.now(timezone.utc).isoformat(),
+            "elapsed_seconds": round(time.perf_counter() - started, 3),
+        }
         write_json_atomic(manifest_path, manifest)
     except BaseException:
+        if publication_started:
+            target.unlink(missing_ok=True)
+            if backup is not None and backup.exists():
+                os.replace(backup, target)
+        if temporary.exists():
+            temporary.unlink()
         _remove_manifest_partials(manifest_path)
         raise
+    if backup is not None and backup.exists():
+        backup.unlink()
     return {
         "stage": "event_density_matcher",
         "action": "built",

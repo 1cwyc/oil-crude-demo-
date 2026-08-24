@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from datetime import datetime, timezone
 import json
 import os
@@ -885,6 +886,90 @@ class DensityBatchHardeningTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, message):
                         read_accepted_events(config)
                     path.unlink()
+
+
+class DensityBatchManifestAndPublishTests(unittest.TestCase):
+    @staticmethod
+    def _build(root: Path):
+        from ais_tanker_pipeline.environment.event_density_matcher import run_density_matcher
+
+        events = root / "events.parquet"
+        write_events(events, DensityBatchTests._rows())
+        config = DensityBatchHardeningTests._config(root, events, root / "output")
+        return config, run_density_matcher(config)
+
+    def test_bad_manifest_root_and_boolean_or_nested_tampering_fail_closed_and_force_recovers(self) -> None:
+        """JSON shape and typed manifest fields are part of the idempotency trust boundary."""
+        from ais_tanker_pipeline.artifacts import OutputConflict
+        from ais_tanker_pipeline.environment.event_density_matcher import run_density_matcher
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config, report = self._build(root)
+            manifest_path = Path(report["manifest_path"])
+            valid = json.loads(manifest_path.read_text(encoding="utf-8"))
+            malformed = [
+                [],
+                {**copy.deepcopy(valid), "counts": {**valid["counts"], "fixed_1025": True}},
+                {**copy.deepcopy(valid), "summary": {**valid["summary"], "fixed_1025": True}},
+                {**copy.deepcopy(valid), "inputs": [{**valid["inputs"][0], "size_bytes": True}, *valid["inputs"][1:]]},
+                {key: value for key, value in valid.items() if key != "summary"},
+                {**copy.deepcopy(valid), "output": "not-a-record"},
+            ]
+            for index, payload in enumerate(malformed):
+                with self.subTest(index=index):
+                    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+                    with self.assertRaises(OutputConflict):
+                        run_density_matcher(config)
+                    rebuilt = run_density_matcher(config, force=True)
+                    self.assertEqual(rebuilt["action"], "built")
+                    valid = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    def test_partial_validation_failure_keeps_existing_target_and_manifest_bytes(self) -> None:
+        """A forced rebuild validates its staged Parquet before replacing a good publication."""
+        import ais_tanker_pipeline.environment.event_density_matcher as matcher
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config, report = self._build(root)
+            target = Path(report["output_path"])
+            manifest_path = Path(report["manifest_path"])
+            target_before = target.read_bytes()
+            manifest_before = manifest_path.read_bytes()
+            with patch.object(matcher.os, "replace", wraps=matcher.os.replace) as replace:
+                with patch.object(
+                    matcher,
+                    "validate_density_output",
+                    side_effect=RuntimeError("staged validation failed"),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "staged validation failed"):
+                        matcher.run_density_matcher(config, force=True)
+            replace.assert_not_called()
+            self.assertEqual(target.read_bytes(), target_before)
+            self.assertEqual(manifest_path.read_bytes(), manifest_before)
+            self.assertEqual(list(target.parent.glob("*.partial-*.parquet")), [])
+
+    def test_manifest_publication_failure_restores_previous_target_and_manifest(self) -> None:
+        """A failed manifest publish rolls a forced replacement back to the old coherent pair."""
+        import ais_tanker_pipeline.environment.event_density_matcher as matcher
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config, report = self._build(root)
+            target = Path(report["output_path"])
+            manifest_path = Path(report["manifest_path"])
+            target_before = target.read_bytes()
+            manifest_before = manifest_path.read_bytes()
+            write_events(
+                root / "events.parquet",
+                DensityBatchTests._rows() + [("new", "accepted", 1751328000, 1751331600, 0.0, 0.0)],
+            )
+            with patch.object(matcher, "write_json_atomic", side_effect=OSError("manifest failed")):
+                with self.assertRaisesRegex(OSError, "manifest failed"):
+                    matcher.run_density_matcher(config, force=True)
+            self.assertEqual(target.read_bytes(), target_before)
+            self.assertEqual(manifest_path.read_bytes(), manifest_before)
+            self.assertEqual(list(target.parent.glob("*.partial-*.parquet")), [])
 
 
 if __name__ == "__main__":
