@@ -1,0 +1,24 @@
+events_path: "${AIS_ENV_ROOT}/events/loading_unloading_events"
+output_root: "${AIS_ENV_ROOT}/derived-output"
+era5_files:
+  - "${AIS_ENV_ROOT}/environment/era5_part_1.nc"
+  - "${AIS_ENV_ROOT}/environment/era5_part_2.nc"
+woa23_monthly_files:
+  "01": "${AIS_ENV_ROOT}/environment/woa23_01.nc"
+  "02": "${AIS_ENV_ROOT}/environment/woa23_02.nc"
+  "03": "${AIS_ENV_ROOT}/environment/woa23_03.nc"
+  "04": "${AIS_ENV_ROOT}/environment/woa23_04.nc"
+  "05": "${AIS_ENV_ROOT}/environment/woa23_05.nc"
+  "06": "${AIS_ENV_ROOT}/environment/woa23_06.nc"
+  "07": "${AIS_ENV_ROOT}/environment/woa23_07.nc"
+  "08": "${AIS_ENV_ROOT}/environment/woa23_08.nc"
+  "09": "${AIS_ENV_ROOT}/environment/woa23_09.nc"
+  "10": "${AIS_ENV_ROOT}/environment/woa23_10.nc"
+  "11": "${AIS_ENV_ROOT}/environment/woa23_11.nc"
+  "12": "${AIS_ENV_ROOT}/environment/woa23_12.nc"
+search_radius_km: 75
+fallback_density_kg_m3: 1025
+sea_pressure_dbar: 0
+salinity_valid_range: [0, 50]
+sst_valid_range_c: [-5, 47]
+density_valid_range_kg_m3: [990, 1050]
