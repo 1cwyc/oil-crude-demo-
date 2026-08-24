@@ -64,38 +64,40 @@ def match_event_density(
     config: DensityConfig,
 ) -> DensityResult:
     """Match both environmental sources or use the configured whole-event fallback."""
-    event_id = getattr(event, "event_id", "")
+    event_id = event.event_id
+    if event.end_s <= event.start_s:
+        return _fallback(event_id, config)
     try:
-        # Validate the whole event window even though its month is selected by
-        # the caller when it loads the two monthly source slices.
-        event_month(event.start_s, event.end_s)
         longitude = float(event.longitude_deg)
         latitude = float(event.latitude_deg)
-        if (
-            not math.isfinite(longitude)
-            or not math.isfinite(latitude)
-            or not -180.0 <= longitude <= 180.0
-            or not -90.0 <= latitude <= 90.0
-        ):
-            return _fallback(event_id, config)
+    except (TypeError, ValueError):
+        return _fallback(event_id, config)
+    if (
+        not math.isfinite(longitude)
+        or not math.isfinite(latitude)
+        or not -180.0 <= longitude <= 180.0
+        or not -90.0 <= latitude <= 90.0
+    ):
+        return _fallback(event_id, config)
 
-        sp = nearest_valid_value(
-            salinity,
-            longitude,
-            latitude,
-            config.search_radius_km,
-            config.salinity_valid_range,
-        )
-        temperature = nearest_valid_value(
-            sst_c,
-            longitude,
-            latitude,
-            config.search_radius_km,
-            config.sst_valid_range_c,
-        )
-        if sp is None or temperature is None:
-            return _fallback(event_id, config)
+    sp = nearest_valid_value(
+        salinity,
+        longitude,
+        latitude,
+        config.search_radius_km,
+        config.salinity_valid_range,
+    )
+    temperature = nearest_valid_value(
+        sst_c,
+        longitude,
+        latitude,
+        config.search_radius_km,
+        config.sst_valid_range_c,
+    )
+    if sp is None or temperature is None:
+        return _fallback(event_id, config)
 
+    try:
         density = calculate_teos10_density(
             sp,
             temperature,
@@ -103,9 +105,9 @@ def match_event_density(
             latitude,
             config.sea_pressure_dbar,
         )
-        lower, upper = config.density_valid_range_kg_m3
-        if not np.isfinite(density) or not lower <= density <= upper:
-            return _fallback(event_id, config)
-        return DensityResult(event_id, float(density), "teos10")
-    except Exception:
+    except (ArithmeticError, ValueError):
         return _fallback(event_id, config)
+    lower, upper = config.density_valid_range_kg_m3
+    if not np.isfinite(density) or not lower <= density <= upper:
+        return _fallback(event_id, config)
+    return DensityResult(event_id, float(density), "teos10")

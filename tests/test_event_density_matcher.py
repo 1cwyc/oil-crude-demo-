@@ -549,7 +549,7 @@ class DensityCalculationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             config = self._config(Path(temporary))
             event = EventRecord("e1", 1, 2, 120.0, 30.0)
-            for response in (RuntimeError("gsw failure"), np.nan, 1100.0):
+            for response in (ValueError("gsw numerical failure"), np.nan, 1100.0):
                 with self.subTest(response=response):
                     with patch("ais_tanker_pipeline.environment.density.calculate_teos10_density") as calculate:
                         if isinstance(response, Exception):
@@ -749,6 +749,142 @@ class DensityBatchTests(unittest.TestCase):
                     matcher.run_density_matcher(config)
             target_dir = root / "output" / "environment" / "event_seawater_density"
             self.assertEqual(list(target_dir.glob("*.partial-*.parquet")), [])
+
+
+class DensityBatchHardeningTests(unittest.TestCase):
+    @staticmethod
+    def _rows() -> list[tuple[object, ...]]:
+        return DensityBatchTests._rows()
+
+    @staticmethod
+    def _config(root: Path, events_path: Path, output_root: Path):
+        era, woa = write_complete_sources(root)
+        config_path = write_density_config(root, [era], woa)
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        raw["events_path"] = str(events_path)
+        raw["output_root"] = str(output_root)
+        config_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+        return load_density_config(config_path)
+
+    def test_rejects_output_overlap_with_event_file_even_when_forced(self) -> None:
+        """An event source must never be replaced by the sidecar, including with force."""
+        from ais_tanker_pipeline.environment.event_density_matcher import run_density_matcher
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output_root = root / "output"
+            target = output_root / "environment" / "event_seawater_density" / "event_seawater_density.parquet"
+            write_events(target, self._rows())
+            config = self._config(root, target, output_root)
+            for force in (False, True):
+                with self.subTest(force=force):
+                    with self.assertRaisesRegex(ValueError, "overlaps an input"):
+                        run_density_matcher(config, force=force)
+
+    def test_rejects_output_below_partitioned_event_directory(self) -> None:
+        """A new sidecar inside an event dataset tree would corrupt a later directory scan."""
+        from ais_tanker_pipeline.environment.event_density_matcher import run_density_matcher
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            events_dir = root / "events"
+            write_events(events_dir / "part.parquet", self._rows())
+            config = self._config(root, events_dir, events_dir)
+            with self.assertRaisesRegex(ValueError, "inside the event input directory"):
+                run_density_matcher(config, force=True)
+
+    def test_nearest_neighbor_runtime_error_blocks_batch_without_output(self) -> None:
+        """An implementation/runtime failure in spatial matching is not a row-level fallback."""
+        from ais_tanker_pipeline.environment.event_density_matcher import run_density_matcher
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            events = root / "events.parquet"
+            write_events(events, self._rows())
+            config = self._config(root, events, root / "output")
+            with patch(
+                "ais_tanker_pipeline.environment.density.nearest_valid_value",
+                side_effect=RuntimeError("nearest failed"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "nearest failed"):
+                    run_density_matcher(config)
+            self.assertFalse(
+                (root / "output" / "environment" / "event_seawater_density" / "event_seawater_density.parquet").exists()
+            )
+
+    def test_same_signature_but_corrupt_output_never_skips(self) -> None:
+        """mtime and size are not integrity proof; the output digest and schema must be rechecked."""
+        from ais_tanker_pipeline.artifacts import OutputConflict
+        from ais_tanker_pipeline.environment.event_density_matcher import run_density_matcher
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            events = root / "events.parquet"
+            write_events(events, self._rows())
+            config = self._config(root, events, root / "output")
+            report = run_density_matcher(config)
+            output = Path(report["output_path"])
+            signature = output.stat()
+            damaged = bytearray(output.read_bytes())
+            damaged[0] ^= 0xFF
+            output.write_bytes(damaged)
+            os.utime(output, ns=(signature.st_atime_ns, signature.st_mtime_ns))
+            with self.assertRaises(OutputConflict):
+                run_density_matcher(config)
+
+    def test_output_validation_rejects_extra_columns_nan_and_null_method(self) -> None:
+        """Strict output validation rejects data that summary counts alone would conceal."""
+        from ais_tanker_pipeline.environment.event_density_matcher import validate_density_output
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cases = {
+                "extra": "SELECT 'e'::VARCHAR AS event_id, 1025.0::DOUBLE AS seawater_density_kg_m3, 'teos10'::VARCHAR AS density_method, 1::BIGINT AS debug",
+                "nan": "SELECT 'e'::VARCHAR AS event_id, 'NaN'::DOUBLE AS seawater_density_kg_m3, 'teos10'::VARCHAR AS density_method",
+                "null-method": "SELECT 'e'::VARCHAR AS event_id, 1025.0::DOUBLE AS seawater_density_kg_m3, NULL::VARCHAR AS density_method",
+            }
+            for name, query in cases.items():
+                with self.subTest(name=name):
+                    path = root / f"{name}.parquet"
+                    connection = duckdb.connect()
+                    try:
+                        connection.execute(f"COPY ({query}) TO ? (FORMAT PARQUET)", [str(path)])
+                    finally:
+                        connection.close()
+                    with self.assertRaisesRegex(RuntimeError, "density output contract failed"):
+                        validate_density_output(path, 1)
+
+    def test_rejects_partition_member_with_missing_column_or_type_drift(self) -> None:
+        """Each partition member must satisfy the event contract before unioning rows."""
+        from ais_tanker_pipeline.environment.event_density_matcher import read_accepted_events
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            events_dir = root / "events"
+            write_events(events_dir / "valid.parquet", [self._rows()[0]])
+            config = self._config(root, events_dir, root / "output")
+            for name, query, message in (
+                (
+                    "missing",
+                    "SELECT 'bad'::VARCHAR AS event_id, 'accepted'::VARCHAR AS event_status, 1::BIGINT AS event_start_s, 2::BIGINT AS event_end_s, 0.0::DOUBLE AS event_longitude_deg",
+                    "missing columns: event_latitude_deg",
+                ),
+                (
+                    "type-drift",
+                    "SELECT 'bad'::VARCHAR AS event_id, 'accepted'::VARCHAR AS event_status, '1'::VARCHAR AS event_start_s, 2::BIGINT AS event_end_s, 0.0::DOUBLE AS event_longitude_deg, 0.0::DOUBLE AS event_latitude_deg",
+                    "incompatible types: event_start_s",
+                ),
+            ):
+                with self.subTest(name=name):
+                    path = events_dir / "invalid.parquet"
+                    connection = duckdb.connect()
+                    try:
+                        connection.execute(f"COPY ({query}) TO ? (FORMAT PARQUET)", [str(path)])
+                    finally:
+                        connection.close()
+                    with self.assertRaisesRegex(ValueError, message):
+                        read_accepted_events(config)
+                    path.unlink()
 
 
 if __name__ == "__main__":
