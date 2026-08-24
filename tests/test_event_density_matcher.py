@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 import os
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
 
+import duckdb
 import numpy as np
+import pandas as pd
 import xarray as xr
 import yaml
 
@@ -112,6 +115,28 @@ def write_complete_sources(root: Path, *, era_units: str = "K") -> tuple[Path, d
         write_woa(path, month)
         woa[f"{month:02d}"] = path
     return era, woa
+
+
+def write_events(path: Path, rows: list[tuple[object, ...]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    connection = duckdb.connect()
+    try:
+        frame = pd.DataFrame(
+            rows,
+            columns=[
+                "event_id", "event_status", "event_start_s", "event_end_s",
+                "event_longitude_deg", "event_latitude_deg",
+            ],
+        )
+        connection.register("event_rows", frame)
+        connection.execute(
+            """
+            COPY event_rows TO ? (FORMAT PARQUET, COMPRESSION ZSTD)
+            """,
+            [str(path)],
+        )
+    finally:
+        connection.close()
 
 
 class DensityConfigTests(unittest.TestCase):
@@ -558,6 +583,172 @@ class DensityCalculationTests(unittest.TestCase):
                 config,
             )
         self.assertEqual({fallback.method, calculated.method}, {"fixed_1025", "teos10"})
+
+
+class DensityBatchTests(unittest.TestCase):
+    @staticmethod
+    def _rows() -> list[tuple[object, ...]]:
+        return [
+            ("accepted-valid", "accepted", 1751328000, 1751331600, 0.0, 0.0),
+            ("accepted-fallback", "accepted", 1751328000, 1751331600, None, 0.0),
+            ("rejected", "rejected", 1751328000, 1751331600, 0.0, 0.0),
+        ]
+
+    def _config_with_sources(self, root: Path):
+        era, woa = write_complete_sources(root)
+        return load_density_config(write_density_config(root, [era], woa))
+
+    def test_builds_three_column_sidecar_for_accepted_events_and_skips_identical_run(self) -> None:
+        """A missing acceptance filter, fallback, output contract, or idempotency branch fails here."""
+        from ais_tanker_pipeline.environment.event_density_matcher import run_density_matcher
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write_events(root / "events.parquet", self._rows())
+            config = self._config_with_sources(root)
+            report = run_density_matcher(config)
+            output = Path(report["output_path"])
+            connection = duckdb.connect()
+            try:
+                columns = [row[0] for row in connection.execute(
+                    "DESCRIBE SELECT * FROM read_parquet(?)", [str(output)]
+                ).fetchall()]
+                rows = connection.execute(
+                    "SELECT event_id, density_method FROM read_parquet(?) ORDER BY event_id",
+                    [str(output)],
+                ).fetchall()
+            finally:
+                connection.close()
+            self.assertEqual(columns, ["event_id", "seawater_density_kg_m3", "density_method"])
+            self.assertEqual(rows, [("accepted-fallback", "fixed_1025"), ("accepted-valid", "teos10")])
+            self.assertEqual(report["counts"], {"rows": 2, "teos10": 1, "fixed_1025": 1})
+            manifest = json.loads(Path(report["manifest_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(manifest["config_hash"], config.config_hash)
+            self.assertEqual(len(manifest["inputs"]), 14)
+            self.assertTrue(all("sha256" in item for item in manifest["inputs"]))
+            self.assertEqual(run_density_matcher(config)["action"], "skipped")
+
+    def test_reads_accepted_events_from_partitioned_input_in_stable_order(self) -> None:
+        """Directory discovery or unstable event ordering changes the public reader result."""
+        from ais_tanker_pipeline.environment.event_density_matcher import read_accepted_events
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write_events(root / "events" / "b" / "part.parquet", [self._rows()[0]])
+            write_events(root / "events" / "a" / "part.parquet", [self._rows()[1], self._rows()[2]])
+            era, woa = write_complete_sources(root)
+            config_path = write_density_config(root, [era], woa)
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            raw["events_path"] = str(root / "events")
+            config_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+            events = read_accepted_events(load_density_config(config_path))
+            self.assertEqual([event.event_id for event in events], ["accepted-fallback", "accepted-valid"])
+
+    def test_rejects_missing_or_incompatible_event_contracts_and_invalid_accepted_times(self) -> None:
+        """Removing schema/type/time validation would allow malformed accepted events through."""
+        from ais_tanker_pipeline.environment.event_density_matcher import read_accepted_events
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = self._config_with_sources(root)
+            connection = duckdb.connect()
+            try:
+                connection.execute(
+                    "COPY (SELECT 'e'::VARCHAR AS event_id, 'accepted'::VARCHAR AS event_status, "
+                    "1::BIGINT AS event_start_s, 2::BIGINT AS event_end_s, 0.0::DOUBLE AS event_longitude_deg) "
+                    "TO ? (FORMAT PARQUET)",
+                    [str(root / "events.parquet")],
+                )
+            finally:
+                connection.close()
+            with self.assertRaisesRegex(ValueError, "missing columns: event_latitude_deg"):
+                read_accepted_events(config)
+            connection = duckdb.connect()
+            try:
+                connection.execute(
+                    "COPY (SELECT 'e'::VARCHAR AS event_id, 'accepted'::VARCHAR AS event_status, "
+                    "'bad'::VARCHAR AS event_start_s, 2::BIGINT AS event_end_s, 0.0::DOUBLE AS event_longitude_deg, 0.0::DOUBLE AS event_latitude_deg) "
+                    "TO ? (FORMAT PARQUET)",
+                    [str(root / "events.parquet")],
+                )
+            finally:
+                connection.close()
+            with self.assertRaisesRegex(ValueError, "incompatible types: event_start_s"):
+                read_accepted_events(config)
+            write_events(root / "events.parquet", [("bad-time", "accepted", 2, 1, 0.0, 0.0)])
+            with self.assertRaisesRegex(ValueError, "event_end_s must be greater"):
+                read_accepted_events(config)
+
+    def test_rejects_duplicate_accepted_ids_but_ignores_rejected_duplicate(self) -> None:
+        """The reader must enforce uniqueness only over events selected for processing."""
+        from ais_tanker_pipeline.environment.event_density_matcher import read_accepted_events
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = self._config_with_sources(root)
+            write_events(root / "events.parquet", [
+                ("duplicate", "accepted", 1, 2, 0.0, 0.0),
+                ("duplicate", "accepted", 3, 4, 0.0, 0.0),
+            ])
+            with self.assertRaisesRegex(ValueError, "accepted event_id must be unique"):
+                read_accepted_events(config)
+            write_events(root / "events.parquet", [
+                ("same", "accepted", 1, 2, 0.0, 0.0),
+                ("same", "rejected", 3, 4, 0.0, 0.0),
+            ])
+            self.assertEqual([event.event_id for event in read_accepted_events(config)], ["same"])
+
+    def test_conflicts_on_changed_input_or_damaged_output_and_force_rebuilds(self) -> None:
+        """A stale manifest or modified sidecar must not be silently treated as current."""
+        from ais_tanker_pipeline.artifacts import OutputConflict
+        from ais_tanker_pipeline.environment.event_density_matcher import run_density_matcher
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write_events(root / "events.parquet", self._rows())
+            config = self._config_with_sources(root)
+            first = run_density_matcher(config)
+            write_events(root / "events.parquet", self._rows() + [("new", "accepted", 1751328000, 1751331600, 0.0, 0.0)])
+            with self.assertRaises(OutputConflict):
+                run_density_matcher(config)
+            rebuilt = run_density_matcher(config, force=True)
+            self.assertEqual(rebuilt["counts"]["rows"], 3)
+            Path(first["output_path"]).write_bytes(b"damaged")
+            with self.assertRaises(OutputConflict):
+                run_density_matcher(config)
+            self.assertEqual(run_density_matcher(config, force=True)["action"], "built")
+
+    def test_dry_run_needs_no_sources_or_hashing_and_writes_nothing(self) -> None:
+        """Dry-run must remain a plan even when every configured source is absent."""
+        from ais_tanker_pipeline.environment.event_density_matcher import run_density_matcher
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = load_density_config(
+                write_density_config(
+                    root,
+                    [root / "missing-era.nc"],
+                    {f"{month:02d}": root / f"missing-{month:02d}.nc" for month in range(1, 13)},
+                )
+            )
+            report = run_density_matcher(config, dry_run=True)
+            self.assertEqual(report["action"], "would_build")
+            self.assertFalse(Path(report["output_path"]).exists())
+            self.assertFalse((root / "output" / "reports" / "manifests").exists())
+
+    def test_write_failure_removes_partial_parquet(self) -> None:
+        """A failed final replace must not leave a discoverable partial output file."""
+        import ais_tanker_pipeline.environment.event_density_matcher as matcher
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write_events(root / "events.parquet", self._rows())
+            config = self._config_with_sources(root)
+            with patch.object(matcher.os, "replace", side_effect=OSError("replace failed")):
+                with self.assertRaisesRegex(OSError, "replace failed"):
+                    matcher.run_density_matcher(config)
+            target_dir = root / "output" / "environment" / "event_seawater_density"
+            self.assertEqual(list(target_dir.glob("*.partial-*.parquet")), [])
 
 
 if __name__ == "__main__":
