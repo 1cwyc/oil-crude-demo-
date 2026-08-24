@@ -949,6 +949,81 @@ class DensityBatchManifestAndPublishTests(unittest.TestCase):
             self.assertEqual(manifest_path.read_bytes(), manifest_before)
             self.assertEqual(list(target.parent.glob("*.partial-*.parquet")), [])
 
+
+class DensityBatchCrashRecoveryTests(unittest.TestCase):
+    @staticmethod
+    def _build(root: Path):
+        return DensityBatchManifestAndPublishTests._build(root)
+
+    @staticmethod
+    def _paths(report: dict[str, object]) -> tuple[Path, Path, Path, Path, Path]:
+        target = Path(report["output_path"])
+        manifest = Path(report["manifest_path"])
+        return (
+            target,
+            manifest,
+            target.with_name(f"{target.stem}.staging{target.suffix}"),
+            target.with_name(f"{target.stem}.backup{target.suffix}"),
+            manifest.with_name(f"{manifest.name}.partial"),
+        )
+
+    def test_recovers_or_cleans_each_provable_crash_state_before_skip(self) -> None:
+        """Known remnants are restored or removed only when the prior publication proves safe."""
+        from ais_tanker_pipeline.environment.event_density_matcher import run_density_matcher
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config, report = self._build(root)
+            target, manifest, staging, backup, manifest_partial = self._paths(report)
+            published = target.read_bytes()
+            valid_manifest = manifest.read_bytes()
+
+            # Crash after target -> backup, before staging -> target.
+            os.replace(target, backup)
+            self.assertEqual(run_density_matcher(config)["action"], "skipped")
+            self.assertEqual(target.read_bytes(), published)
+            self.assertFalse(backup.exists())
+
+            # Crash after staging -> target, before manifest publication.
+            os.replace(target, backup)
+            target.write_bytes(b"unpublished staged bytes")
+            self.assertEqual(run_density_matcher(config)["action"], "skipped")
+            self.assertEqual(target.read_bytes(), published)
+            self.assertFalse(backup.exists())
+
+            # Crash after manifest publication, before old backup cleanup.
+            backup.write_bytes(published)
+            self.assertEqual(run_density_matcher(config)["action"], "skipped")
+            self.assertFalse(backup.exists())
+
+            # Crash before manifest partial publication.
+            manifest_partial.parent.mkdir(parents=True, exist_ok=True)
+            manifest_partial.write_text('{"incomplete": true}', encoding="utf-8")
+            self.assertEqual(run_density_matcher(config)["action"], "skipped")
+            self.assertFalse(manifest_partial.exists())
+            self.assertFalse(staging.exists())
+            self.assertEqual(manifest.read_bytes(), valid_manifest)
+
+    def test_force_rebuilds_target_without_manifest_and_cleans_known_remnants(self) -> None:
+        """Force retains the only target long enough to publish a new coherent pair, then cleans it up."""
+        from ais_tanker_pipeline.environment.event_density_matcher import run_density_matcher
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config, report = self._build(root)
+            target, manifest, staging, backup, manifest_partial = self._paths(report)
+            manifest.unlink()
+            staging.write_bytes(b"abandoned staging")
+            manifest_partial.parent.mkdir(parents=True, exist_ok=True)
+            manifest_partial.write_text("{}", encoding="utf-8")
+            rebuilt = run_density_matcher(config, force=True)
+            self.assertEqual(rebuilt["action"], "built")
+            self.assertTrue(target.exists())
+            self.assertTrue(manifest.exists())
+            self.assertFalse(staging.exists())
+            self.assertFalse(backup.exists())
+            self.assertFalse(manifest_partial.exists())
+
     def test_manifest_publication_failure_restores_previous_target_and_manifest(self) -> None:
         """A failed manifest publish rolls a forced replacement back to the old coherent pair."""
         import ais_tanker_pipeline.environment.event_density_matcher as matcher
@@ -964,7 +1039,7 @@ class DensityBatchManifestAndPublishTests(unittest.TestCase):
                 root / "events.parquet",
                 DensityBatchTests._rows() + [("new", "accepted", 1751328000, 1751331600, 0.0, 0.0)],
             )
-            with patch.object(matcher, "write_json_atomic", side_effect=OSError("manifest failed")):
+            with patch.object(matcher, "_write_manifest_atomic", side_effect=OSError("manifest failed")):
                 with self.assertRaisesRegex(OSError, "manifest failed"):
                     matcher.run_density_matcher(config, force=True)
             self.assertEqual(target.read_bytes(), target_before)

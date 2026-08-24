@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 import math
 import os
 from pathlib import Path
@@ -18,10 +19,8 @@ from ais_tanker_pipeline.artifacts import (
     OutputConflict,
     canonical_hash,
     file_signature,
-    partial_path,
     read_manifest,
     sha256_file,
-    write_json_atomic,
 )
 
 from .config import DensityConfig
@@ -206,13 +205,24 @@ def _process_events(
     return sorted(results, key=lambda item: item.event_id)
 
 
-def _write_parquet_partial(results: list[DensityResult], target: Path) -> Path:
+def _staging_path(target: Path) -> Path:
+    return target.with_name(f"{target.stem}.staging{target.suffix}")
+
+
+def _backup_path(target: Path) -> Path:
+    return target.with_name(f"{target.stem}.backup{target.suffix}")
+
+
+def _manifest_partial_path(manifest_path: Path) -> Path:
+    return manifest_path.with_name(f"{manifest_path.name}.partial")
+
+
+def _write_parquet_staging(results: list[DensityResult], staging: Path) -> Path:
     frame = pd.DataFrame(
         [(item.event_id, item.density_kg_m3, item.method) for item in results],
         columns=OUTPUT_COLUMNS,
     )
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = partial_path(target)
+    staging.parent.mkdir(parents=True, exist_ok=True)
     try:
         connection = duckdb.connect()
         try:
@@ -227,14 +237,14 @@ def _write_parquet_partial(results: list[DensityResult], target: Path) -> Path:
                     ORDER BY event_id
                 ) TO ? (FORMAT PARQUET, COMPRESSION ZSTD)
                 """,
-                [str(temporary)],
+                [str(staging)],
             )
         finally:
             connection.close()
-        return temporary
+        return staging
     except BaseException:
-        if temporary.exists():
-            temporary.unlink()
+        if staging.exists():
+            staging.unlink()
         raise
 
 
@@ -265,22 +275,24 @@ def _input_paths(config: DensityConfig) -> tuple[Path, ...]:
 
 def _reject_output_input_overlap(
     config: DensityConfig, target: Path, manifest_path: Path
-) -> tuple[Path, ...]:
-    inputs = _input_paths(config)
+) -> None:
     output_paths = (
         target,
         manifest_path,
-        partial_path(target),
-        manifest_path.with_name(f"{manifest_path.name}.partial-{uuid.uuid4().hex}"),
+        _staging_path(target),
+        _backup_path(target),
+        _manifest_partial_path(manifest_path),
     )
-    input_keys = {_path_key(path) for path in (*inputs, config.path)}
+    input_keys = {
+        _path_key(path)
+        for path in (*config.era5_files, *config.woa23_monthly_files.values(), config.path, config.events_path)
+    }
     if any(_path_key(path) in input_keys for path in output_paths):
         raise ValueError("density output overlaps an input file")
     if config.events_path.is_dir() and any(
         _is_within(path, config.events_path) for path in output_paths
     ):
         raise ValueError("density output is inside the event input directory")
-    return inputs
 
 
 def _input_records(paths: tuple[Path, ...]) -> list[dict[str, Any]]:
@@ -401,9 +413,97 @@ def _matching_output_summary(
     return summary
 
 
-def _remove_manifest_partials(manifest_path: Path) -> None:
-    for temporary in manifest_path.parent.glob(f"{manifest_path.name}.partial-*"):
+def _write_manifest_atomic(manifest_path: Path, manifest: dict[str, Any]) -> None:
+    temporary = _manifest_partial_path(manifest_path)
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        temporary.write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        os.replace(temporary, manifest_path)
+    except BaseException:
         temporary.unlink(missing_ok=True)
+        raise
+
+
+def _manifest_matches_file(
+    manifest: object, path: Path, config: DensityConfig
+) -> bool:
+    if not _is_manifest(manifest) or not path.exists():
+        return False
+    try:
+        summary = validate_density_output(
+            path, manifest["counts"]["rows"], config.density_valid_range_kg_m3
+        )
+        counts = {
+            "rows": summary["rows"],
+            "teos10": summary["teos10"],
+            "fixed_1025": summary["fixed_1025"],
+        }
+        return (
+            manifest["output"]["sha256"] == sha256_file(path)
+            and _typed_equal(manifest["counts"], counts)
+            and _typed_equal(manifest["summary"], summary)
+        )
+    except (KeyError, TypeError, ValueError, OSError, duckdb.Error, RuntimeError):
+        return False
+
+
+def _unknown_recovery_remnants(target: Path, manifest_path: Path) -> tuple[Path, ...]:
+    known = {
+        _path_key(_staging_path(target)),
+        _path_key(_backup_path(target)),
+        _path_key(_manifest_partial_path(manifest_path)),
+    }
+    candidates = (
+        *target.parent.glob(f"{target.stem}.staging*{target.suffix}"),
+        *target.parent.glob(f"{target.stem}.backup*{target.suffix}"),
+        *target.parent.glob(f"{target.stem}.partial-*{target.suffix}"),
+        *manifest_path.parent.glob(f"{manifest_path.name}.partial*"),
+    )
+    return tuple(path for path in candidates if _path_key(path) not in known)
+
+
+def _cleanup_known_remnants(target: Path, manifest_path: Path) -> None:
+    for path in (_staging_path(target), _backup_path(target), _manifest_partial_path(manifest_path)):
+        path.unlink(missing_ok=True)
+
+
+def _recover_publication(
+    target: Path, manifest_path: Path, config: DensityConfig, force: bool
+) -> None:
+    """Recover only deterministic remnants backed by a verified old publication."""
+    staging = _staging_path(target)
+    backup = _backup_path(target)
+    manifest = read_manifest(manifest_path)
+    if _unknown_recovery_remnants(target, manifest_path):
+        raise OutputConflict("ambiguous density publication remnants require manual inspection")
+
+    target_matches = _matching_output_summary(manifest, target, config) is not None
+    backup_matches = _manifest_matches_file(manifest, backup, config)
+    if target_matches:
+        _cleanup_known_remnants(target, manifest_path)
+        return
+    if backup_matches:
+        if target.exists():
+            target.unlink()
+        os.replace(backup, target)
+        if _matching_output_summary(manifest, target, config) is None:
+            raise RuntimeError("recovered density backup failed publication verification")
+        _cleanup_known_remnants(target, manifest_path)
+        return
+
+    has_remnants = staging.exists() or backup.exists() or _manifest_partial_path(manifest_path).exists()
+    if backup.exists():
+        raise OutputConflict("unverified density backup requires manual inspection")
+    if has_remnants and not force:
+        raise OutputConflict("ambiguous density publication remnants require --force or manual inspection")
+    if force and target.exists() and read_manifest(manifest_path) is None:
+        staging.unlink(missing_ok=True)
+        _manifest_partial_path(manifest_path).unlink(missing_ok=True)
+        return
+    if has_remnants:
+        raise OutputConflict("unverified density publication remnants require manual inspection")
 
 
 def run_density_matcher(
@@ -423,7 +523,9 @@ def run_density_matcher(
     if dry_run:
         return {"stage": "event_density_matcher", "action": "would_build", "output_path": str(target)}
 
-    input_paths = _reject_output_input_overlap(config, target, manifest_path)
+    _reject_output_input_overlap(config, target, manifest_path)
+    _recover_publication(target, manifest_path, config, force)
+    input_paths = _input_paths(config)
     inputs = _input_records(input_paths)
     fingerprint = canonical_hash(inputs)
     existing = read_manifest(manifest_path)
@@ -454,15 +556,14 @@ def run_density_matcher(
     events = read_accepted_events(config)
     catalog = build_source_catalog(config)
     results = _process_events(events, catalog, config)
-    temporary = _write_parquet_partial(results, target)
-    backup: Path | None = None
+    temporary = _write_parquet_staging(results, _staging_path(target))
+    backup = _backup_path(target)
     publication_started = False
     try:
         summary = validate_density_output(
             temporary, len(events), config.density_valid_range_kg_m3
         )
         if target.exists():
-            backup = partial_path(target)
             os.replace(target, backup)
             publication_started = True
         os.replace(temporary, target)
@@ -487,18 +588,17 @@ def run_density_matcher(
             "created_at_utc": datetime.now(timezone.utc).isoformat(),
             "elapsed_seconds": round(time.perf_counter() - started, 3),
         }
-        write_json_atomic(manifest_path, manifest)
+        _write_manifest_atomic(manifest_path, manifest)
     except BaseException:
         if publication_started:
             target.unlink(missing_ok=True)
-            if backup is not None and backup.exists():
+            if backup.exists():
                 os.replace(backup, target)
         if temporary.exists():
             temporary.unlink()
-        _remove_manifest_partials(manifest_path)
+        _manifest_partial_path(manifest_path).unlink(missing_ok=True)
         raise
-    if backup is not None and backup.exists():
-        backup.unlink()
+    _cleanup_known_remnants(target, manifest_path)
     return {
         "stage": "event_density_matcher",
         "action": "built",
