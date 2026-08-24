@@ -38,6 +38,19 @@ def nearest_valid_value(
     valid_range: tuple[float, float],
 ) -> float | None:
     """Choose the nearest finite, in-range grid value within ``radius_km``."""
+    try:
+        if len(valid_range) != 2:
+            raise ValueError
+        lower, upper = (float(bound) for bound in valid_range)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("valid_range must contain two finite bounds") from exc
+    if (
+        not np.isfinite(lower)
+        or not np.isfinite(upper)
+        or lower >= upper
+    ):
+        raise ValueError("valid_range must contain two finite bounds in ascending order")
+
     if (
         not np.isfinite(event_lon)
         or not np.isfinite(event_lat)
@@ -47,9 +60,21 @@ def nearest_valid_value(
     ):
         return None
 
-    latitude_margin = np.degrees(radius_km / EARTH_RADIUS_KM) + 1e-12
-    cosine = max(abs(math.cos(math.radians(event_lat))), 1e-6)
-    longitude_margin = min(180.0, latitude_margin / cosine)
+    angular_radius = radius_km / EARTH_RADIUS_KM
+    latitude_margin = np.degrees(angular_radius) + 1e-12
+    event_lat_rad = math.radians(event_lat)
+    if angular_radius >= (math.pi / 2.0 - abs(event_lat_rad)):
+        # Once the spherical cap reaches a pole, every longitude can be
+        # represented by a point in the cap at that pole.
+        longitude_margin = 180.0
+    else:
+        # The half-width is maximized at the latitude furthest from the
+        # equator in the latitude window. asin(sin(delta)/cos(phi)) is a
+        # conservative bound for every candidate row in that window.
+        maximum_abs_latitude = abs(event_lat_rad) + angular_radius
+        cosine = math.cos(maximum_abs_latitude)
+        ratio = min(1.0, max(0.0, math.sin(angular_radius) / cosine))
+        longitude_margin = min(180.0, np.degrees(np.arcsin(ratio)) + 1e-12)
 
     # Restrict both axes before forming the candidate mesh. This keeps the
     # distance calculation bounded by the local coordinate windows.
@@ -70,7 +95,6 @@ def nearest_valid_value(
     latitudes = grid.latitudes[lat_index].ravel()
     longitudes = grid.longitudes[lon_index].ravel()
 
-    lower, upper = valid_range
     valid = np.isfinite(values) & (values >= lower) & (values <= upper)
     if not np.any(valid):
         return None
@@ -79,7 +103,7 @@ def nearest_valid_value(
     longitudes = longitudes[valid]
 
     distances = haversine_km(event_lon, event_lat, longitudes, latitudes)
-    within = distances <= radius_km + 1e-9
+    within = distances <= radius_km
     if not np.any(within):
         return None
     values = values[within]

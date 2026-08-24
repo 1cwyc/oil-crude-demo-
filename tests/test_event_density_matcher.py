@@ -17,7 +17,7 @@ from ais_tanker_pipeline.environment.sources import (
     build_source_catalog,
     load_environment_month,
 )
-from ais_tanker_pipeline.environment.spatial import nearest_valid_value
+from ais_tanker_pipeline.environment.spatial import EARTH_RADIUS_KM, nearest_valid_value
 
 
 STUDY_MONTHS = tuple(
@@ -331,14 +331,79 @@ class SpatialMatchTests(unittest.TestCase):
         self.assertEqual(nearest_valid_value(grid, 0.0, 0.0, 75.0, (0.0, 50.0)), 10.0)
 
     def test_accepts_exact_radius_and_rejects_beyond_radius(self) -> None:
-        latitude_at_75_km = np.degrees(75.0 / 6371.0088)
+        radius_km = 75.0
+        latitude_at_radius = np.degrees(radius_km / EARTH_RADIUS_KM)
+        latitude_beyond_radius = np.degrees((radius_km + 1e-6) / EARTH_RADIUS_KM)
         grid = GridSlice(
             values=np.array([[35.0]], dtype=float),
-            latitudes=np.array([latitude_at_75_km]),
+            latitudes=np.array([latitude_at_radius]),
             longitudes=np.array([0.0]),
         )
-        self.assertEqual(nearest_valid_value(grid, 0.0, 0.0, 75.0, (0.0, 50.0)), 35.0)
-        self.assertIsNone(nearest_valid_value(grid, 0.0, 0.0, 74.999, (0.0, 50.0)))
+        # Construct the boundary from the same angular radius used by the
+        # implementation, then use a separately constructed 1e-6 km excess.
+        self.assertEqual(nearest_valid_value(grid, 0.0, 0.0, radius_km, (0.0, 50.0)), 35.0)
+        beyond = GridSlice(
+            values=np.array([[36.0]], dtype=float),
+            latitudes=np.array([latitude_beyond_radius]),
+            longitudes=np.array([0.0]),
+        )
+        self.assertIsNone(nearest_valid_value(beyond, 0.0, 0.0, radius_km, (0.0, 50.0)))
+
+    def test_high_latitude_candidate_window_covers_spherical_cap(self) -> None:
+        radius_km = 75.0
+        event_lat = 80.0
+        angular_radius = radius_km / EARTH_RADIUS_KM
+        exact_half_width = np.degrees(
+            2.0
+            * np.arcsin(
+                np.sin(angular_radius / 2.0)
+                / np.cos(np.radians(event_lat))
+            )
+        )
+        # This point is just inside the exact spherical boundary but outside
+        # the old linear latitude-margin/cosine approximation.
+        candidate_lon = exact_half_width - 1e-4
+        grid = GridSlice(
+            values=np.array([[37.0]], dtype=float),
+            latitudes=np.array([event_lat]),
+            longitudes=np.array([candidate_lon]),
+        )
+        self.assertEqual(
+            nearest_valid_value(grid, 0.0, event_lat, radius_km, (0.0, 50.0)),
+            37.0,
+        )
+
+    def test_zero_radius_only_accepts_the_event_coordinate(self) -> None:
+        grid = GridSlice(
+            values=np.array([[38.0]], dtype=float),
+            latitudes=np.array([0.0]),
+            longitudes=np.array([0.0]),
+        )
+        self.assertEqual(nearest_valid_value(grid, 0.0, 0.0, 0.0, (0.0, 50.0)), 38.0)
+        self.assertIsNone(nearest_valid_value(grid, 0.001, 0.0, 0.0, (0.0, 50.0)))
+
+    def test_invalid_radius_returns_no_match(self) -> None:
+        grid = GridSlice(
+            values=np.array([[39.0]], dtype=float),
+            latitudes=np.array([0.0]),
+            longitudes=np.array([0.0]),
+        )
+        for radius_km in (-1.0, np.nan, np.inf, -np.inf):
+            with self.subTest(radius_km=radius_km):
+                self.assertIsNone(
+                    nearest_valid_value(grid, 0.0, 0.0, radius_km, (0.0, 50.0))
+                )
+
+    def test_invalid_valid_range_is_rejected(self) -> None:
+        grid = GridSlice(
+            values=np.array([[40.0]], dtype=float),
+            latitudes=np.array([0.0]),
+            longitudes=np.array([0.0]),
+        )
+        for valid_range in ((50.0, 0.0), (1.0, 1.0), (np.nan, 50.0), (0.0, np.inf)):
+            with self.subTest(valid_range=valid_range):
+                with self.assertRaises(ValueError):
+                    nearest_valid_value(grid, 0.0, 0.0, 75.0, valid_range)
 
 
 if __name__ == "__main__":
