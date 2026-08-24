@@ -17,6 +17,7 @@ from ais_tanker_pipeline.environment.sources import (
     build_source_catalog,
     load_environment_month,
 )
+from ais_tanker_pipeline.environment.spatial import nearest_valid_value
 
 
 STUDY_MONTHS = tuple(
@@ -302,6 +303,42 @@ class SourceContractTests(unittest.TestCase):
             catalog = build_source_catalog(config)
             with self.assertRaisesRegex(ValueError, "grid values must be finite or NaN"):
                 load_environment_month(catalog, "2025-07")
+
+
+class SpatialMatchTests(unittest.TestCase):
+    def test_selects_nearest_valid_cell_across_longitude_conventions(self) -> None:
+        grid = GridSlice(
+            values=np.array([[np.nan, 34.0, 36.0]], dtype=float),
+            latitudes=np.array([0.0]),
+            longitudes=np.array([358.0, 359.5, 1.0]),
+        )
+        self.assertEqual(nearest_valid_value(grid, -0.4, 0.0, 75.0, (0.0, 50.0)), 34.0)
+
+    def test_chooses_geographic_nearest_not_array_nearest(self) -> None:
+        grid = GridSlice(
+            values=np.array([[30.0, 31.0], [32.0, 33.0]], dtype=float),
+            latitudes=np.array([0.0, 0.5]),
+            longitudes=np.array([0.0, 0.5]),
+        )
+        self.assertEqual(nearest_valid_value(grid, 0.45, 0.45, 75.0, (0.0, 50.0)), 33.0)
+
+    def test_equal_distance_tie_uses_latitude_then_longitude(self) -> None:
+        grid = GridSlice(
+            values=np.array([[10.0, 11.0], [20.0, 21.0]], dtype=float),
+            latitudes=np.array([-0.1, 0.1]),
+            longitudes=np.array([-0.1, 0.1]),
+        )
+        self.assertEqual(nearest_valid_value(grid, 0.0, 0.0, 75.0, (0.0, 50.0)), 10.0)
+
+    def test_accepts_exact_radius_and_rejects_beyond_radius(self) -> None:
+        latitude_at_75_km = np.degrees(75.0 / 6371.0088)
+        grid = GridSlice(
+            values=np.array([[35.0]], dtype=float),
+            latitudes=np.array([latitude_at_75_km]),
+            longitudes=np.array([0.0]),
+        )
+        self.assertEqual(nearest_valid_value(grid, 0.0, 0.0, 75.0, (0.0, 50.0)), 35.0)
+        self.assertIsNone(nearest_valid_value(grid, 0.0, 0.0, 74.999, (0.0, 50.0)))
 
 
 if __name__ == "__main__":
