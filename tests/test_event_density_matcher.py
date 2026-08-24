@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import os
 from pathlib import Path
 import tempfile
@@ -11,6 +12,13 @@ import xarray as xr
 import yaml
 
 from ais_tanker_pipeline.environment.config import load_density_config
+from ais_tanker_pipeline.environment.density import (
+    DensityResult,
+    EventRecord,
+    calculate_teos10_density,
+    event_month,
+    match_event_density,
+)
 from ais_tanker_pipeline.environment.sources import (
     EnvironmentSourceError,
     GridSlice,
@@ -426,6 +434,130 @@ class SpatialMatchTests(unittest.TestCase):
             nearest_valid_value(grid, -100.0, -90.0, 75.0, (0.0, 50.0)),
             44.0,
         )
+
+
+class DensityCalculationTests(unittest.TestCase):
+    def _config(self, root: Path):
+        return load_density_config(
+            write_density_config(
+                root,
+                [root / "era.nc"],
+                {f"{month:02d}": root / f"woa_{month:02d}.nc" for month in range(1, 13)},
+            )
+        )
+
+    @staticmethod
+    def _grid(value: float) -> GridSlice:
+        return GridSlice(
+            np.array([[value]], dtype=np.float64),
+            np.array([30.0]),
+            np.array([120.0]),
+        )
+
+    def test_event_month_uses_utc_window_midpoint_across_months(self) -> None:
+        start = int(datetime(2025, 7, 31, 22, tzinfo=timezone.utc).timestamp())
+        end = int(datetime(2025, 8, 1, 4, tzinfo=timezone.utc).timestamp())
+        self.assertEqual(event_month(start, end), "2025-08")
+        with self.assertRaisesRegex(ValueError, "event_end_s must be greater"):
+            event_month(end, end)
+
+    def test_calculates_known_teos10_density(self) -> None:
+        self.assertAlmostEqual(
+            calculate_teos10_density(35.0, 15.0, 120.0, 30.0, 0.0),
+            1025.976584971187,
+            places=8,
+        )
+
+    def test_missing_either_environment_source_falls_back_for_the_whole_event(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            config = self._config(Path(temporary))
+            event = EventRecord("e1", 1, 2, 120.0, 30.0)
+            missing = self._grid(np.nan)
+            valid_salinity = self._grid(35.0)
+            valid_sst = self._grid(15.0)
+            for salinity, sst in (
+                (missing, valid_sst),
+                (valid_salinity, missing),
+                (missing, missing),
+            ):
+                with self.subTest(
+                    salinity_missing=np.isnan(salinity.values[0, 0]),
+                    sst_missing=np.isnan(sst.values[0, 0]),
+                ):
+                    result = match_event_density(event, salinity, sst, config)
+                    self.assertEqual(
+                        result,
+                        DensityResult("e1", config.fallback_density_kg_m3, "fixed_1025"),
+                    )
+
+    def test_valid_sources_use_teos10(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            config = self._config(Path(temporary))
+            result = match_event_density(
+                EventRecord("e1", 1, 2, 120.0, 30.0),
+                self._grid(35.0),
+                self._grid(15.0),
+                config,
+            )
+        self.assertEqual(result.method, "teos10")
+        self.assertAlmostEqual(result.density_kg_m3, 1025.976584971187, places=8)
+
+    def test_invalid_event_coordinates_or_time_fall_back_without_raising(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            config = self._config(Path(temporary))
+            valid_salinity = self._grid(35.0)
+            valid_sst = self._grid(15.0)
+            for event in (
+                EventRecord("none", 1, 2, None, 30.0),
+                EventRecord("longitude", 1, 2, 181.0, 30.0),
+                EventRecord("latitude", 1, 2, 120.0, np.inf),
+                EventRecord("time", 2, 1, 120.0, 30.0),
+            ):
+                with self.subTest(event_id=event.event_id):
+                    result = match_event_density(event, valid_salinity, valid_sst, config)
+                    self.assertEqual(
+                        result,
+                        DensityResult(event.event_id, config.fallback_density_kg_m3, "fixed_1025"),
+                    )
+
+    def test_gsw_exceptions_nonfinite_and_out_of_range_density_fall_back(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            config = self._config(Path(temporary))
+            event = EventRecord("e1", 1, 2, 120.0, 30.0)
+            for response in (RuntimeError("gsw failure"), np.nan, 1100.0):
+                with self.subTest(response=response):
+                    with patch("ais_tanker_pipeline.environment.density.calculate_teos10_density") as calculate:
+                        if isinstance(response, Exception):
+                            calculate.side_effect = response
+                        else:
+                            calculate.return_value = response
+                        result = match_event_density(
+                            event,
+                            self._grid(35.0),
+                            self._grid(15.0),
+                            config,
+                        )
+                    self.assertEqual(
+                        result,
+                        DensityResult("e1", config.fallback_density_kg_m3, "fixed_1025"),
+                    )
+
+    def test_density_method_is_one_of_the_exact_public_values(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            config = self._config(Path(temporary))
+            fallback = match_event_density(
+                EventRecord("fallback", 1, 2, None, 30.0),
+                self._grid(35.0),
+                self._grid(15.0),
+                config,
+            )
+            calculated = match_event_density(
+                EventRecord("calculated", 1, 2, 120.0, 30.0),
+                self._grid(35.0),
+                self._grid(15.0),
+                config,
+            )
+        self.assertEqual({fallback.method, calculated.method}, {"fixed_1025", "teos10"})
 
 
 if __name__ == "__main__":
