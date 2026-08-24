@@ -13,6 +13,7 @@ import yaml
 from ais_tanker_pipeline.environment.config import load_density_config
 from ais_tanker_pipeline.environment.sources import (
     EnvironmentSourceError,
+    GridSlice,
     build_source_catalog,
     load_environment_month,
 )
@@ -30,14 +31,16 @@ def write_era5(
     *,
     units: str = "K",
     latitudes: np.ndarray | None = None,
+    longitudes: np.ndarray | None = None,
+    sst_value: float = 288.15,
 ) -> None:
-    values = np.full((len(months), 3, 3), 288.15, dtype=np.float32)
+    values = np.full((len(months), 3, 3), sst_value, dtype=np.float32)
     dataset = xr.Dataset(
         {"sst": (("valid_time", "latitude", "longitude"), values, {"units": units})},
         coords={
             "valid_time": np.array([np.datetime64(f"{month}-01", "ns") for month in months]),
             "latitude": latitudes if latitudes is not None else np.array([90.0, 0.0, -90.0]),
-            "longitude": np.array([0.0, 180.0, 359.75]),
+            "longitude": longitudes if longitudes is not None else np.array([0.0, 180.0, 359.75]),
         },
     )
     dataset.to_netcdf(path, engine="h5netcdf")
@@ -142,8 +145,86 @@ class DensityConfigTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "unresolved environment variable"):
                     load_density_config(config_path)
 
+    def test_rejects_woa_month_key_aliases_before_integer_conversion(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            era, woa = write_complete_sources(root)
+            config_path = write_density_config(root, [era], woa)
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            raw["woa23_monthly_files"]["1"] = raw["woa23_monthly_files"]["01"]
+            config_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "keys must be strings 01 through 12"):
+                load_density_config(config_path)
+
+    def test_rejects_duplicate_woa_month_keys_in_yaml(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            era, woa = write_complete_sources(root)
+            config_path = write_density_config(root, [era], woa)
+            contents = config_path.read_text(encoding="utf-8")
+            first_month_line = next(
+                line
+                for line in contents.splitlines(keepends=True)
+                if line.strip().startswith(("'01':", '"01":'))
+            )
+            config_path.write_text(
+                contents.replace(first_month_line, first_month_line + first_month_line, 1),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "invalid density YAML"):
+                load_density_config(config_path)
+
+    def test_rejects_woa_months_that_reuse_a_source_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            era, woa = write_complete_sources(root)
+            woa["02"] = woa["01"]
+            with self.assertRaisesRegex(ValueError, "must not reuse a source file"):
+                load_density_config(write_density_config(root, [era], woa))
+
 
 class SourceContractTests(unittest.TestCase):
+    def test_grid_slice_rejects_non_one_dimensional_or_nonfinite_coordinates(self) -> None:
+        with self.assertRaisesRegex(ValueError, "latitudes must be a one-dimensional finite array"):
+            GridSlice(
+                values=np.ones((1, 3), dtype=np.float64),
+                latitudes=np.array([[0.0]]),
+                longitudes=np.array([0.0, 1.0, 2.0]),
+            )
+        with self.assertRaisesRegex(ValueError, "longitudes must be a one-dimensional finite array"):
+            GridSlice(
+                values=np.ones((1, 3), dtype=np.float64),
+                latitudes=np.array([0.0]),
+                longitudes=np.array([0.0, np.inf, 2.0]),
+            )
+        with self.assertRaisesRegex(ValueError, r"grid values must have shape \(latitude, longitude\)"):
+            GridSlice(
+                values=np.ones((1, 1), dtype=np.float64),
+                latitudes=np.array([0.0, 1.0]),
+                longitudes=np.array([0.0]),
+            )
+
+    def test_grid_slice_rejects_non_float64_or_infinite_values(self) -> None:
+        with self.assertRaisesRegex(ValueError, "grid values must be float64"):
+            GridSlice(
+                values=np.ones((1, 1), dtype=np.float32),
+                latitudes=np.array([0.0]),
+                longitudes=np.array([0.0]),
+            )
+        for value in (np.inf, -np.inf):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "grid values must be finite or NaN"):
+                    GridSlice(
+                        values=np.array([[value]], dtype=np.float64),
+                        latitudes=np.array([0.0]),
+                        longitudes=np.array([0.0]),
+                    )
+        GridSlice(
+            values=np.array([[np.nan]], dtype=np.float64),
+            latitudes=np.array([0.0]),
+            longitudes=np.array([0.0]),
+        )
+
     def test_builds_complete_catalog_and_loads_celsius_surface_grids(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -202,6 +283,25 @@ class SourceContractTests(unittest.TestCase):
             config = load_density_config(write_density_config(root, [era], woa))
             with self.assertRaisesRegex(EnvironmentSourceError, "ERA5 latitude coordinate must be strictly monotonic"):
                 build_source_catalog(config)
+
+    def test_schema_gate_rejects_nonfinite_coordinates(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            era, woa = write_complete_sources(root)
+            write_era5(era, STUDY_MONTHS, longitudes=np.array([0.0, np.inf, 359.75]))
+            config = load_density_config(write_density_config(root, [era], woa))
+            with self.assertRaisesRegex(EnvironmentSourceError, "ERA5 longitude coordinate must be one-dimensional and finite"):
+                build_source_catalog(config)
+
+    def test_load_rejects_infinite_source_values(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            era, woa = write_complete_sources(root)
+            write_era5(era, STUDY_MONTHS, sst_value=np.inf)
+            config = load_density_config(write_density_config(root, [era], woa))
+            catalog = build_source_catalog(config)
+            with self.assertRaisesRegex(ValueError, "grid values must be finite or NaN"):
+                load_environment_month(catalog, "2025-07")
 
 
 if __name__ == "__main__":

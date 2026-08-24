@@ -10,6 +10,35 @@ import yaml
 from ais_tanker_pipeline.artifacts import canonical_hash
 
 
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """Safe YAML loader that rejects duplicate mapping keys."""
+
+
+def _construct_unique_mapping(
+    loader: yaml.SafeLoader,
+    node: yaml.nodes.MappingNode,
+    deep: bool = False,
+) -> dict[Any, Any]:
+    mapping: dict[Any, Any] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        if key in mapping:
+            raise yaml.constructor.ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                f"duplicate key: {key!r}",
+                key_node.start_mark,
+            )
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+_UniqueKeyLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_unique_mapping,
+)
+
+
 @dataclass(frozen=True)
 class DensityConfig:
     path: Path
@@ -51,7 +80,7 @@ def _range(raw: dict[str, Any], key: str) -> tuple[float, float]:
 def load_density_config(path: str | Path) -> DensityConfig:
     config_path = Path(path).resolve()
     try:
-        raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        raw = yaml.load(config_path.read_text(encoding="utf-8"), Loader=_UniqueKeyLoader)
     except yaml.YAMLError as exc:
         raise ValueError(f"invalid density YAML: {config_path}") from exc
     if not isinstance(raw, dict):
@@ -65,14 +94,18 @@ def load_density_config(path: str | Path) -> DensityConfig:
     if missing:
         raise ValueError(f"density config missing fields: {', '.join(missing)}")
     era5 = tuple(_resolve(config_path, str(value)) for value in raw["era5_files"])
+    woa_raw = raw["woa23_monthly_files"]
+    expected_woa_keys = {f"{month:02d}" for month in range(1, 13)}
+    if not isinstance(woa_raw, dict) or set(woa_raw) != expected_woa_keys:
+        raise ValueError("woa23_monthly_files keys must be strings 01 through 12")
     woa = {
         int(key): _resolve(config_path, str(value))
-        for key, value in raw["woa23_monthly_files"].items()
+        for key, value in woa_raw.items()
     }
     if not era5:
         raise ValueError("era5_files must not be empty")
-    if set(woa) != set(range(1, 13)):
-        raise ValueError("woa23_monthly_files must contain keys 01 through 12")
+    if len(set(woa.values())) != len(woa):
+        raise ValueError("woa23_monthly_files must not reuse a source file")
     radius = float(raw["search_radius_km"])
     fallback = float(raw["fallback_density_kg_m3"])
     pressure = float(raw["sea_pressure_dbar"])

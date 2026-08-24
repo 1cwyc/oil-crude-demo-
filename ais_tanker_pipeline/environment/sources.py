@@ -32,8 +32,16 @@ class GridSlice:
     longitudes: np.ndarray
 
     def __post_init__(self) -> None:
-        if self.values.ndim != 2 or self.values.shape != (len(self.latitudes), len(self.longitudes)):
+        if not isinstance(self.values, np.ndarray) or self.values.dtype != np.dtype(np.float64):
+            raise ValueError("grid values must be float64")
+        if self.values.ndim != 2:
             raise ValueError("grid values must have shape (latitude, longitude)")
+        _require_grid_coordinate(self.latitudes, "latitudes")
+        _require_grid_coordinate(self.longitudes, "longitudes")
+        if self.values.shape != (len(self.latitudes), len(self.longitudes)):
+            raise ValueError("grid values must have shape (latitude, longitude)")
+        if not np.all(np.isfinite(self.values) | np.isnan(self.values)):
+            raise ValueError("grid values must be finite or NaN")
 
 
 @dataclass(frozen=True)
@@ -42,7 +50,22 @@ class SourceCatalog:
     woa23_by_month: dict[int, Path]
 
 
+def _require_grid_coordinate(values: np.ndarray, label: str) -> None:
+    try:
+        valid = isinstance(values, np.ndarray) and values.ndim == 1 and np.all(np.isfinite(values))
+    except TypeError:
+        valid = False
+    if not valid:
+        raise ValueError(f"{label} must be a one-dimensional finite array")
+
+
 def _require_monotonic(values: np.ndarray, label: str) -> None:
+    try:
+        valid = values.ndim == 1 and np.all(np.isfinite(values))
+    except TypeError:
+        valid = False
+    if not valid:
+        raise EnvironmentSourceError(f"{label} coordinate must be one-dimensional and finite")
     differences = np.diff(values.astype(float))
     if not (np.all(differences > 0) or np.all(differences < 0)):
         raise EnvironmentSourceError(f"{label} coordinate must be strictly monotonic")
