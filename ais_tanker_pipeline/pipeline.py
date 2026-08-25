@@ -16,19 +16,22 @@ import sys
 import shutil
 import time
 from typing import Any, Iterable
-import uuid
 
 import duckdb
 
 from .config import PipelineConfig, iter_dates, target_epochs
+from .artifacts import (
+    OutputConflict as StageOutputConflict,
+    file_signature as _file_signature,
+    file_signatures as _signatures,
+    partial_path as _partial_path,
+    read_manifest as _read_manifest,
+    write_json_atomic as _write_json_atomic,
+)
 
 
 PIPELINE_VERSION = "1.0.1"
 LOGGER = logging.getLogger(__name__)
-
-
-class StageOutputConflict(RuntimeError):
-    """Raised when an existing output no longer matches its manifest."""
 
 
 def _sql_string(value: str) -> str:
@@ -46,31 +49,9 @@ def _read_parquet_sql(paths: Iterable[Path]) -> str:
     return f"read_parquet([{values}], union_by_name=true, hive_partitioning=false)"
 
 
-def _file_signature(path: Path) -> dict[str, Any]:
-    stat = path.stat()
-    return {
-        "path": str(path),
-        "size_bytes": int(stat.st_size),
-        "mtime_ns": int(stat.st_mtime_ns),
-    }
-
-
-def _signatures(paths: Iterable[Path]) -> list[dict[str, Any]]:
-    return [_file_signature(path) for path in sorted(paths, key=lambda item: str(item).lower())]
-
-
 def _signature_hash(signatures: list[dict[str, Any]]) -> str:
     payload = json.dumps(signatures, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-
-def _read_manifest(path: Path) -> dict[str, Any] | None:
-    if not path.exists():
-        return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
 
 
 def _manifest_matches(
@@ -116,17 +97,6 @@ def _check_existing(
             "请核查后使用 --force 原子重建该派生结果。"
         )
     return False
-
-
-def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f"{path.name}.partial-{uuid.uuid4().hex}")
-    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(temporary, path)
-
-
-def _partial_path(target: Path) -> Path:
-    return target.with_name(f"{target.stem}.partial-{uuid.uuid4().hex}{target.suffix}")
 
 
 def _complete_manifest(

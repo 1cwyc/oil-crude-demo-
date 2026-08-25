@@ -9,4 +9,10 @@ dependencies:
       - numpy==1.26.4
       - matplotlib==3.11.1
       - tzdata>=2025.2
+      - pandas==2.2.3
+      - xarray==2024.11.0
+      - h5py==3.12.1
+      - h5netcdf==1.4.1
+      - gsw==3.6.19
+      - PyYAML==6.0.2
 

@@ -15,7 +15,10 @@
 STA .dat → 年度船舶/油轮登记
 POS .dat + 油轮登记 → 油轮位置
 油轮位置 → 三小时样本 → 可选 CSV/热力图
+外部已接受装卸事件 + ERA5/WOA23 → event_seawater_density sidecar（event_density_matcher CLI）
 ```
+
+`event_density_matcher` 已实现正式 CLI，但它只消费已存在的接受事件表；`event_detector_3h`、`voyage_builder`、`country_validation_builder` 仍未实现。其余下游模块也保持独立 PRD 后实施的边界。
 
 当前流程以 Python、DuckDB 和 Zstandard Parquet 为主。详细算法与限制见 [技术说明](docs/技术说明.md)。
 
@@ -45,6 +48,20 @@ Windows PowerShell：
 ```
 
 自测只读取 `sample_data/` 中的合成记录，并把结果写入临时目录。
+
+## 事件海水密度模块
+
+最短入口（Windows PowerShell）：
+
+```powershell
+$env:AIS_DENSITY_CONFIG = 'D:\data\host-configs\density.yaml'
+& .\.venv\Scripts\python.exe -m ais_tanker_pipeline.environment.event_density_matcher --config $env:AIS_DENSITY_CONFIG --dry-run
+& .\.venv\Scripts\python.exe -m ais_tanker_pipeline.environment.event_density_matcher --config $env:AIS_DENSITY_CONFIG
+```
+
+以 [density.example.yaml](configs/environment/density.example.yaml) 作为主机配置模板。真实事件、ERA5、WOA23 和输出路径只存在于未版本化主机 YAML；模板的 `${AIS_ENV_ROOT}` 是主机环境变量，不得将真实路径或数据提交到仓库。
+
+`--dry-run` 不打开事件或环境源文件。正常首次运行会执行 ERA5/WOA23 的 source schema gate，成功后生成严格三列的 `event_seawater_density.parquet` 与 manifest。相同输入会幂等跳过；只有人工检查冲突的派生输出后才能使用 `--force` 重建。
 
 ## 使用真实 AIS 数据
 
