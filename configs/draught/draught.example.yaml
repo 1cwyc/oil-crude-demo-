@@ -1,0 +1,8 @@
+reference_path: "${AIS_DERIVED_ROOT}/reference/crude_vessels/crude_vessels.parquet"
+static_root: "${AIS_MONTH_ROOT}/registry/static_shards"
+output_root: "${AIS_DERIVED_ROOT}"
+draught_valid_range_m: [1.0, 30.0]
+state_tolerance_m: 0.30
+max_observation_gap_hours: 48
+minimum_state_duration_hours: 6
+minimum_state_observations: 3
