@@ -1,6 +1,6 @@
 # Draught State Builder Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Status:** 已完成。下列 checkbox 保留为历史 TDD 实施记录；真实月验收与独立审查修复已在模块提交中完成。
 
 **Goal:** Build a deterministic, monthly-range stable-draught sidecar for authoritative crude vessels without copying static AIS records.
 

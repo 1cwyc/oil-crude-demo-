@@ -1,6 +1,6 @@
 # 原油船稳定吃水状态模块 PRD
 
-> 状态：已确认设计，尚未实施。本文是 `draught_state_builder` 的唯一规格；不覆盖港区、装卸事件、航次、货量或网络。
+> 状态：已实施并通过 2025-09 真实月验收。本文是 `draught_state_builder` 的唯一规格；不覆盖港区、装卸事件、航次、货量或网络。
 
 ## 1. 目标与任务分级
 
@@ -16,7 +16,7 @@
 ### 有明显收益但保持轻量
 
 - 记录输入、配置和输出 SHA256；支持幂等、`--dry-run`、`--force` 与已验证 backup 恢复。
-- 在 manifest 汇总未匹配静态记录、无效吃水和短状态数量。
+- 在 manifest 汇总归并后的有效观测数、输出状态数及同 IMO/同刻冲突归并审计。
 
 ### 当前不实施
 
@@ -59,7 +59,7 @@ minimum_state_duration_hours: 6
 minimum_state_observations: 3
 ```
 
-版本 1 固定上述阈值；未知、重复或缺失配置字段均失败关闭，规范化配置进入 manifest 哈希。算法版本为 `1.1.0`，用于标识同 IMO 同刻中位数归并规则，进入 manifest 和状态 ID。
+版本 1 固定上述阈值；未知、重复或缺失配置字段均失败关闭，规范化配置进入 manifest 哈希。算法版本为 `1.1.1`，用于标识同 IMO 同刻中位数归并及关键键 gate，进入 manifest 和状态 ID。
 
 从参考表读取：`crude_vessel_id` (VARCHAR)、`imo` (VARCHAR)、`mmsi` (INTEGER)。`imo` 和 `crude_vessel_id` 必须非空且唯一；重复 MMSI 保留为歧义，不能用于兜底。
 
@@ -68,7 +68,7 @@ minimum_state_observations: 3
 ## 4. 匹配、清洗与状态规则
 
 1. 静态 `imo` 与参考 `imo` 精确匹配时优先；未命中时仅匹配参考表唯一 MMSI。
-2. 相同 IMO 的不同静态 MMSI 统一为同一 `crude_vessel_id`；IMO/MMSI 冲突时 IMO 胜出；歧义 MMSI 未命中时丢弃并在 manifest 计数。
+2. 相同 IMO 的不同静态 MMSI 统一为同一 `crude_vessel_id`；IMO/MMSI 冲突时 IMO 胜出；歧义 MMSI 未命中时丢弃。
 3. 仅保留有限且处于 `(1.0, 30.0]` 的 `draught_m`。无效值不成为状态，也不修改原始静态表。
 4. 对同一有效 IMO、同一 `receive_time_s` 的全部有效吃水报告直接取中位数；即使组内极差超过 0.30 m 也不阻断。极差超过 0.30 m 的这类组记为一次冲突归并，并记录其最大极差。没有有效 IMO 的 MMSI 兜底同刻组仍按原容差失败关闭；该归并不放宽后续稳定状态段的 0.30 m 容差。
 5. 按物理船和 UTC 时间排序。相邻观测若间隔不超过 48 h 且扩展后本段吃水极差不超过 0.30 m，则属于同一候选段；否则切段。
@@ -96,7 +96,7 @@ reports/manifests/draught_state_builder_YYYY-MM_YYYY-MM.json
 
 不落盘原始吃水、MMSI、IMO、观测数、极差、质量位、匹配方法或 confidence。它们只用于计算、测试和 manifest 汇总。
 
-manifest 记录算法版本、请求月份、配置哈希、所有输入签名/SHA256、输出签名/SHA256、有效观测数、IMO/MMSI 匹配数、无效/歧义/短状态数、`imo_timestamp_conflict_merged_groups`、`imo_timestamp_conflict_merged_max_spread_m` 和输出状态数。
+manifest 记录算法版本、请求月份、配置哈希、所有输入签名/SHA256、输出签名/SHA256、归并后的有效观测数、`imo_timestamp_conflict_merged_groups`、`imo_timestamp_conflict_merged_max_spread_m` 和输出状态数。
 
 ## 6. CLI、幂等与恢复
 

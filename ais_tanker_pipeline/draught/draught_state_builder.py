@@ -27,7 +27,7 @@ from ais_tanker_pipeline.artifacts import (
 from ais_tanker_pipeline.draught.config import DraughtConfig, load_draught_config, month_range
 
 
-DRAUGHT_STATE_ALGORITHM_VERSION = "1.1.0"
+DRAUGHT_STATE_ALGORITHM_VERSION = "1.1.1"
 
 
 @dataclass(frozen=True)
@@ -74,6 +74,31 @@ def _require_column_types(
     wrong = sorted(name for name, accepted in expected.items() if columns[name] not in accepted)
     if wrong:
         raise ValueError(f"{label} wrong types: {', '.join(wrong)}")
+
+
+def _require_reference_identity_contract(connection: duckdb.DuckDBPyConnection, reference: Path) -> None:
+    null_identities = connection.execute(
+        "SELECT count(*) FROM read_parquet(?) WHERE crude_vessel_id IS NULL OR trim(crude_vessel_id) = '' OR imo IS NULL OR trim(imo) = ''",
+        [str(reference)],
+    ).fetchone()[0]
+    if null_identities:
+        raise ValueError("crude fleet reference contains NULL or empty crude_vessel_id/imo")
+    for column in ("crude_vessel_id", "imo"):
+        duplicates = connection.execute(
+            f"SELECT count(*) FROM (SELECT {column} FROM read_parquet(?) GROUP BY {column} HAVING count(*) > 1)",
+            [str(reference)],
+        ).fetchone()[0]
+        if duplicates:
+            raise ValueError(f"crude fleet reference duplicate {column}")
+
+
+def _require_static_key_contract(connection: duckdb.DuckDBPyConnection, static_path: Path) -> None:
+    null_keys = connection.execute(
+        "SELECT count(*) FROM read_parquet(?) WHERE mmsi IS NULL OR receive_time_s IS NULL",
+        [str(static_path)],
+    ).fetchone()[0]
+    if null_keys:
+        raise ValueError("static AIS contains NULL mmsi or receive_time_s")
 
 
 def _conflicting_draught_error(vessel_id: str, receive_time_s: int, values: list[float]) -> ValueError:
@@ -127,6 +152,7 @@ def iter_matched_observations(
                 },
                 "crude fleet reference",
             )
+            _require_reference_identity_contract(connection, reference)
             for path in static:
                 _require_columns(connection, path, {"mmsi", "receive_time_s", "imo", "draught_m", "dq_mask"}, "static AIS")
                 _require_column_types(
@@ -141,6 +167,7 @@ def iter_matched_observations(
                     },
                     "static AIS",
                 )
+                _require_static_key_contract(connection, path)
             cursor = connection.execute(
                 """
             WITH unique_mmsi AS (
@@ -267,7 +294,7 @@ def _target_for_state(output_root: Path, state: DraughtState) -> Path:
     )
 
 
-def _write_states(states: list[DraughtState], target: Path) -> None:
+def _stage_states(states: list[DraughtState], target: Path) -> Path:
     temporary = partial_path(target)
     target.parent.mkdir(parents=True, exist_ok=True)
     frame = pandas.DataFrame(
@@ -286,7 +313,106 @@ def _write_states(states: list[DraughtState], target: Path) -> None:
         )
     finally:
         connection.close()
-    os.replace(temporary, target)
+    return temporary
+
+
+def _manifest_output_hash(manifest: object, target: Path) -> str | None:
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("outputs"), list):
+        return None
+    for output in manifest["outputs"]:
+        if isinstance(output, dict) and output.get("path") == str(target) and isinstance(output.get("sha256"), str):
+            return output["sha256"]
+    return None
+
+
+def _target_matches_manifest(manifest: object, target: Path) -> bool:
+    expected_hash = _manifest_output_hash(manifest, target)
+    if expected_hash is None or not target.is_file():
+        return False
+    try:
+        return sha256_file(target) == expected_hash
+    except OSError:
+        return False
+
+
+def _recover_draught_publication(manifest_path: Path) -> None:
+    """Restore manifest-verified state partitions from an interrupted replacement."""
+    manifest = read_manifest(manifest_path)
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("outputs"), list):
+        return
+    for output in manifest["outputs"]:
+        if not isinstance(output, dict) or not isinstance(output.get("path"), str):
+            raise OutputConflict("invalid draught state manifest output prevents recovery")
+        target = Path(output["path"])
+        backup = target.with_name(f"{target.stem}.backup{target.suffix}")
+        if not backup.exists():
+            continue
+        expected_hash = _manifest_output_hash(manifest, target)
+        if expected_hash is None or sha256_file(backup) != expected_hash:
+            raise OutputConflict("unverified draught state backup requires manual inspection")
+        if _target_matches_manifest(manifest, target):
+            backup.unlink()
+            continue
+        os.replace(backup, target)
+        if not _target_matches_manifest(manifest, target):
+            raise OutputConflict("recovered draught state backup failed verification")
+
+
+def _manifest_authorizes_skip(
+    manifest: object, config: DraughtConfig, months: tuple[str, ...], inputs: list[dict[str, object]]
+) -> bool:
+    if not (
+        isinstance(manifest, dict)
+        and manifest.get("status") == "complete"
+        and manifest.get("module_name") == "draught_state_builder"
+        and manifest.get("algorithm_version") == DRAUGHT_STATE_ALGORITHM_VERSION
+        and manifest.get("config_hash") == config.config_hash
+        and manifest.get("months") == list(months)
+        and manifest.get("inputs") == inputs
+        and isinstance(manifest.get("outputs"), list)
+        and manifest["outputs"]
+    ):
+        return False
+    return all(
+        isinstance(output, dict)
+        and isinstance(output.get("path"), str)
+        and isinstance(output.get("sha256"), str)
+        and _target_matches_manifest(manifest, Path(output["path"]))
+        for output in manifest["outputs"]
+    )
+
+
+def _publish_staged_states(staged: dict[Path, Path], manifest_path: Path, manifest: dict[str, object]) -> None:
+    """Atomically replace all state partitions or restore the previous manifest-backed set."""
+    backups = {target: target.with_name(f"{target.stem}.backup{target.suffix}") for target in staged}
+    if any(backup.exists() for backup in backups.values()):
+        raise OutputConflict("draught state recovery backup exists; inspect it before rebuilding")
+    moved_previous: set[Path] = set()
+    published: set[Path] = set()
+    try:
+        for target, backup in backups.items():
+            if target.exists():
+                os.replace(target, backup)
+                moved_previous.add(target)
+        for target, temporary in staged.items():
+            os.replace(temporary, target)
+            published.add(target)
+        write_json_atomic(manifest_path, manifest)
+    except BaseException:
+        for temporary in staged.values():
+            temporary.unlink(missing_ok=True)
+        for target in published:
+            if target not in moved_previous:
+                target.unlink(missing_ok=True)
+        for target in moved_previous:
+            backup = backups[target]
+            if backup.exists():
+                target.unlink(missing_ok=True)
+                os.replace(backup, target)
+        raise
+    else:
+        for backup in backups.values():
+            backup.unlink(missing_ok=True)
 
 
 def run_draught_state_builder(
@@ -294,11 +420,21 @@ def run_draught_state_builder(
 ) -> dict[str, object]:
     """Publish deterministic stable-draught states for an inclusive UTC month range."""
     months = month_range(start_month, end_month)
+    manifest_path = config.output_root / "reports" / "manifests" / f"draught_state_builder_{start_month}_{end_month}.json"
+    _recover_draught_publication(manifest_path)
     static_paths = _static_files(config.static_root, months)
     inputs = [
         {**file_signature(path), "sha256": sha256_file(path)}
         for path in (config.reference_path, *static_paths)
     ]
+    existing = read_manifest(manifest_path)
+    if _manifest_authorizes_skip(existing, config, months, inputs):
+        return {
+            "action": "skipped",
+            "output_paths": [output["path"] for output in existing["outputs"]],
+            "manifest_path": str(manifest_path),
+            "counts": existing["counts"],
+        }
     observation_count = 0
     observation_audit = ObservationAudit()
 
@@ -321,8 +457,6 @@ def run_draught_state_builder(
     if not grouped:
         raise ValueError("no stable draught states for requested month range")
     targets = tuple(sorted(grouped, key=str))
-    manifest_path = config.output_root / "reports" / "manifests" / f"draught_state_builder_{start_month}_{end_month}.json"
-    existing = read_manifest(manifest_path)
     if (
         isinstance(existing, dict)
         and existing.get("status") == "complete"
@@ -336,9 +470,14 @@ def run_draught_state_builder(
         return {"action": "skipped", "output_paths": [str(path) for path in targets], "manifest_path": str(manifest_path), "counts": existing["counts"]}
     if (manifest_path.exists() or any(path.exists() for path in targets)) and not force:
         raise OutputConflict("draught state output already exists; inspect it before rebuilding")
-    for target, target_states in grouped.items():
-        _write_states(target_states, target)
-    outputs = [{**file_signature(path), "sha256": sha256_file(path)} for path in targets]
+    staged = {target: _stage_states(grouped[target], target) for target in targets}
+    outputs = [
+        {
+            "path": str(target), "size_bytes": temporary.stat().st_size,
+            "mtime_ns": temporary.stat().st_mtime_ns, "sha256": sha256_file(temporary),
+        }
+        for target, temporary in staged.items()
+    ]
     manifest = {
         "status": "complete", "module_name": "draught_state_builder",
         "algorithm_version": DRAUGHT_STATE_ALGORITHM_VERSION, "config_hash": config.config_hash,
@@ -349,7 +488,7 @@ def run_draught_state_builder(
             "imo_timestamp_conflict_merged_max_spread_m": observation_audit.imo_timestamp_conflict_merged_max_spread_m,
         },
     }
-    write_json_atomic(manifest_path, manifest)
+    _publish_staged_states(staged, manifest_path, manifest)
     return {"action": "built", "output_paths": [str(path) for path in targets], "manifest_path": str(manifest_path), "counts": manifest["counts"]}
 
 

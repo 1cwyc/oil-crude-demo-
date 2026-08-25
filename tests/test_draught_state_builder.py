@@ -3,9 +3,11 @@ from __future__ import annotations
 from contextlib import redirect_stdout
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import duckdb
 import pandas as pd
@@ -127,6 +129,43 @@ class DraughtConfigTests(unittest.TestCase):
 
 
 class DraughtObservationTests(unittest.TestCase):
+    def test_rejects_a_reference_with_duplicate_imo_before_joining_static_reports(self) -> None:
+        """Fails if a duplicated reference IMO can multiply one static report into false states."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reference = root / "reference.parquet"
+            static = root / "static.parquet"
+            write_parquet(
+                reference,
+                [("imo:9424209", "9424209", 111), ("duplicate:9424209", "9424209", 222)],
+                ["crude_vessel_id", "imo", "mmsi"],
+            )
+            write_parquet(static, [(111, 100, "9424209", 12.0, 0)], ["mmsi", "receive_time_s", "imo", "draught_m", "dq_mask"])
+
+            with self.assertRaisesRegex(ValueError, "crude fleet reference duplicate imo"):
+                read_matched_observations(reference, [static], valid_range=(1.0, 30.0), tolerance_m=0.30)
+
+    def test_rejects_static_reports_with_null_mmsi_before_matching(self) -> None:
+        """Fails if a nullable static join key is silently discarded instead of blocking the month."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reference = root / "reference.parquet"
+            static = root / "static.parquet"
+            write_parquet(reference, [("imo:9424209", "9424209", 111)], ["crude_vessel_id", "imo", "mmsi"])
+            connection = duckdb.connect()
+            try:
+                connection.execute(
+                    "COPY (SELECT CAST(NULL AS INTEGER) AS mmsi, CAST(100 AS BIGINT) AS receive_time_s, "
+                    "CAST('9424209' AS VARCHAR) AS imo, CAST(12.0 AS DOUBLE) AS draught_m, CAST(0 AS UBIGINT) AS dq_mask) "
+                    "TO ? (FORMAT PARQUET)",
+                    [str(static)],
+                )
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(ValueError, "static AIS contains NULL mmsi or receive_time_s"):
+                read_matched_observations(reference, [static], valid_range=(1.0, 30.0), tolerance_m=0.30)
+
     def test_yields_matched_observations_incrementally(self) -> None:
         """Fails if a monthly AIS query materializes every matched observation before reduction."""
         with tempfile.TemporaryDirectory() as temporary:
@@ -276,6 +315,63 @@ class DraughtReducerTests(unittest.TestCase):
 
 
 class DraughtArtifactTests(unittest.TestCase):
+    def test_manifest_publish_failure_restores_previous_state_output(self) -> None:
+        """Fails if a failed forced publish leaves a new state table paired with an old manifest."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reference = root / "reference.parquet"
+            static = root / "static" / "year=2025" / "month=09" / "date=2025-09-01" / "static.parquet"
+            static.parent.mkdir(parents=True)
+            write_parquet(reference, [("imo:9424209", "9424209", 111)], ["crude_vessel_id", "imo", "mmsi"])
+            initial_rows = [(111, 0, "9424209", 12.0, 0), (111, 3 * 3600, "9424209", 12.1, 0), (111, 6 * 3600, "9424209", 12.2, 0)]
+            write_parquet(static, initial_rows, ["mmsi", "receive_time_s", "imo", "draught_m", "dq_mask"])
+            config = DraughtConfig(
+                root / "config.yaml", reference, root / "static", root / "derived", (1.0, 30.0), 0.30, 48.0, 6.0, 3,
+                {"test": "config"},
+            )
+            first = run_draught_state_builder(config, "2025-09", "2025-09")
+            output = Path(first["output_paths"][0])
+            manifest_path = Path(first["manifest_path"])
+            old_output = output.read_bytes()
+            old_manifest = manifest_path.read_bytes()
+            write_parquet(static, [*initial_rows, (111, 9 * 3600, "9424209", 12.1, 0)], ["mmsi", "receive_time_s", "imo", "draught_m", "dq_mask"])
+
+            with patch("ais_tanker_pipeline.draught.draught_state_builder.write_json_atomic", side_effect=OSError("manifest interrupted")):
+                with self.assertRaisesRegex(OSError, "manifest interrupted"):
+                    run_draught_state_builder(config, "2025-09", "2025-09", force=True)
+
+            self.assertEqual(output.read_bytes(), old_output)
+            self.assertEqual(manifest_path.read_bytes(), old_manifest)
+            self.assertFalse(output.with_name(f"{output.stem}.backup{output.suffix}").exists())
+
+    def test_recovers_manifest_verified_backup_before_idempotency_check(self) -> None:
+        """Fails if an interrupted replacement strands a verified state table behind a corrupt target."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reference = root / "reference.parquet"
+            static = root / "static" / "year=2025" / "month=09" / "date=2025-09-01" / "static.parquet"
+            static.parent.mkdir(parents=True)
+            write_parquet(reference, [("imo:9424209", "9424209", 111)], ["crude_vessel_id", "imo", "mmsi"])
+            write_parquet(
+                static,
+                [(111, 0, "9424209", 12.0, 0), (111, 3 * 3600, "9424209", 12.1, 0), (111, 6 * 3600, "9424209", 12.2, 0)],
+                ["mmsi", "receive_time_s", "imo", "draught_m", "dq_mask"],
+            )
+            config = DraughtConfig(
+                root / "config.yaml", reference, root / "static", root / "derived", (1.0, 30.0), 0.30, 48.0, 6.0, 3,
+                {"test": "config"},
+            )
+            first = run_draught_state_builder(config, "2025-09", "2025-09")
+            output = Path(first["output_paths"][0])
+            backup = output.with_name(f"{output.stem}.backup{output.suffix}")
+            os.replace(output, backup)
+            output.write_bytes(b"corrupt interrupted replacement")
+
+            recovered = run_draught_state_builder(config, "2025-09", "2025-09")
+
+            self.assertEqual(recovered["action"], "skipped")
+            self.assertFalse(backup.exists())
+
     def test_records_same_imo_conflict_median_summary_in_manifest(self) -> None:
         """Fails if a wide simultaneous IMO spread is merged but cannot be audited from the manifest."""
         with tempfile.TemporaryDirectory() as temporary:
@@ -304,7 +400,7 @@ class DraughtArtifactTests(unittest.TestCase):
 
         self.assertEqual(manifest["counts"]["imo_timestamp_conflict_merged_groups"], 1)
         self.assertAlmostEqual(manifest["counts"]["imo_timestamp_conflict_merged_max_spread_m"], 0.6)
-        self.assertEqual(manifest["algorithm_version"], "1.1.0")
+        self.assertEqual(manifest["algorithm_version"], "1.1.1")
 
     def test_publishes_month_state_sidecar_and_skips_identical_inputs(self) -> None:
         """Fails if stable states are not published as a minimal idempotent monthly artifact."""
@@ -325,7 +421,11 @@ class DraughtArtifactTests(unittest.TestCase):
             )
 
             first = run_draught_state_builder(config, "2025-09", "2025-09")
-            second = run_draught_state_builder(config, "2025-09", "2025-09")
+            with patch(
+                "ais_tanker_pipeline.draught.draught_state_builder.iter_matched_observations",
+                side_effect=AssertionError("an unchanged artifact must skip before AIS observation scanning"),
+            ):
+                second = run_draught_state_builder(config, "2025-09", "2025-09")
             output = Path(first["output_paths"][0])
             connection = duckdb.connect()
             try:
