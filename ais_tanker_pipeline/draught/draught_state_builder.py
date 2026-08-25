@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import argparse
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import json
 import os
 from pathlib import Path
 from statistics import median
+import sys
 
 import duckdb
 import pandas
@@ -21,7 +24,7 @@ from ais_tanker_pipeline.artifacts import (
     sha256_file,
     write_json_atomic,
 )
-from ais_tanker_pipeline.draught.config import DraughtConfig, month_range
+from ais_tanker_pipeline.draught.config import DraughtConfig, load_draught_config, month_range
 
 
 @dataclass(frozen=True)
@@ -47,6 +50,13 @@ def _parquet_paths(paths: Iterable[str | Path]) -> tuple[Path, ...]:
     return resolved
 
 
+def _require_columns(connection: duckdb.DuckDBPyConnection, path: Path, required: set[str], label: str) -> None:
+    columns = {row[0] for row in connection.execute("DESCRIBE SELECT * FROM read_parquet(?)", [str(path)]).fetchall()}
+    missing = sorted(required.difference(columns))
+    if missing:
+        raise ValueError(f"{label} missing columns: {', '.join(missing)}")
+
+
 def read_matched_observations(
     reference_path: str | Path,
     static_paths: Iterable[str | Path],
@@ -61,6 +71,9 @@ def read_matched_observations(
         raise ValueError("reference_path must be a Parquet file")
     connection = duckdb.connect()
     try:
+        _require_columns(connection, reference, {"crude_vessel_id", "imo", "mmsi"}, "crude fleet reference")
+        for path in static:
+            _require_columns(connection, path, {"mmsi", "receive_time_s", "imo", "draught_m", "dq_mask"}, "static AIS")
         rows = connection.execute(
             """
             WITH unique_mmsi AS (
@@ -226,3 +239,36 @@ def run_draught_state_builder(
     }
     write_json_atomic(manifest_path, manifest)
     return {"action": "built", "output_paths": [str(path) for path in targets], "manifest_path": str(manifest_path), "counts": manifest["counts"]}
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Build stable draught states for crude vessels.")
+    parser.add_argument("--config", required=True, help="Untracked host YAML configuration.")
+    parser.add_argument("--start-month", required=True, help="First UTC month in YYYY-MM form.")
+    parser.add_argument("--end-month", required=True, help="Last UTC month in YYYY-MM form.")
+    parser.add_argument("--dry-run", action="store_true", help="Show target root without opening Parquet.")
+    parser.add_argument("--force", action="store_true", help="Rebuild a reviewed conflicting derived output.")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        config = load_draught_config(args.config)
+        month_range(args.start_month, args.end_month)
+        if args.dry_run:
+            report: dict[str, object] = {
+                "stage": "draught_state_builder", "action": "would_build",
+                "output_root": str(config.output_root / "draught" / "draught_states"),
+            }
+        else:
+            report = run_draught_state_builder(config, args.start_month, args.end_month, force=args.force)
+        print(json.dumps(report, ensure_ascii=False))
+        return 0
+    except (OSError, ValueError, OutputConflict) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from contextlib import redirect_stdout
+import io
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -12,6 +15,7 @@ from ais_tanker_pipeline.draught.config import DraughtConfig, load_draught_confi
 from ais_tanker_pipeline.draught.draught_state_builder import (
     DraughtObservation,
     build_draught_states,
+    main,
     read_matched_observations,
     run_draught_state_builder,
 )
@@ -34,6 +38,33 @@ def state_config() -> DraughtConfig:
 
 
 class DraughtConfigTests(unittest.TestCase):
+    def test_cli_dry_run_does_not_open_missing_parquet(self) -> None:
+        """Fails if planning a draught build reads absent reference or static input."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config_path = root / "draught.yaml"
+            config_path.write_text(
+                yaml.safe_dump(
+                    {
+                        "reference_path": str(root / "missing-reference.parquet"),
+                        "static_root": str(root / "missing-static"),
+                        "output_root": str(root / "derived"),
+                        "draught_valid_range_m": [1.0, 30.0],
+                        "state_tolerance_m": 0.30,
+                        "max_observation_gap_hours": 48,
+                        "minimum_state_duration_hours": 6,
+                        "minimum_state_observations": 3,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = main(["--config", str(config_path), "--start-month", "2025-09", "--end-month", "2025-09", "--dry-run"])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(stdout.getvalue())["action"], "would_build")
+
     def test_loads_the_complete_fixed_version_one_configuration(self) -> None:
         """Fails if a host config can silently change a state-building rule."""
         with tempfile.TemporaryDirectory() as temporary:
@@ -130,6 +161,18 @@ class DraughtObservationTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ValueError, "conflicting draught observations"):
+                read_matched_observations(reference, [static], valid_range=(1.0, 30.0), tolerance_m=0.30)
+
+    def test_rejects_static_schema_without_imo_before_matching(self) -> None:
+        """Fails if schema drift can silently bypass IMO-priority physical identity resolution."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reference = root / "reference.parquet"
+            static = root / "static.parquet"
+            write_parquet(reference, [("imo:9424209", "9424209", 111)], ["crude_vessel_id", "imo", "mmsi"])
+            write_parquet(static, [(111, 100, 12.0, 0)], ["mmsi", "receive_time_s", "draught_m", "dq_mask"])
+
+            with self.assertRaisesRegex(ValueError, "static AIS missing columns: imo"):
                 read_matched_observations(reference, [static], valid_range=(1.0, 30.0), tolerance_m=0.30)
 
 
