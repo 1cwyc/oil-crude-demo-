@@ -1024,6 +1024,44 @@ class DensityBatchCrashRecoveryTests(unittest.TestCase):
             self.assertFalse(backup.exists())
             self.assertFalse(manifest_partial.exists())
 
+    def test_old_range_backup_recovers_before_new_range_conflict_and_force_rebuild(self) -> None:
+        """Recovery proves the old publication by its manifest, not the current density range."""
+        from ais_tanker_pipeline.artifacts import OutputConflict
+        from ais_tanker_pipeline.environment.event_density_matcher import run_density_matcher
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            old_config, report = self._build(root)
+            target, _, _, backup, _ = self._paths(report)
+            old_output = target.read_bytes()
+            os.replace(target, backup)
+
+            raw = yaml.safe_load(old_config.path.read_text(encoding="utf-8"))
+            raw["density_valid_range_kg_m3"] = [990, 1025.5]
+            old_config.path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+            new_config = load_density_config(old_config.path)
+
+            with self.assertRaises(OutputConflict):
+                run_density_matcher(new_config)
+            self.assertEqual(target.read_bytes(), old_output)
+            self.assertFalse(backup.exists())
+
+            rebuilt = run_density_matcher(new_config, force=True)
+            self.assertEqual(rebuilt["counts"], {"rows": 2, "teos10": 0, "fixed_1025": 2})
+            connection = duckdb.connect()
+            try:
+                methods = connection.execute(
+                    "SELECT event_id, density_method FROM read_parquet(?) ORDER BY event_id",
+                    [str(target)],
+                ).fetchall()
+            finally:
+                connection.close()
+            self.assertEqual(
+                methods,
+                [("accepted-fallback", "fixed_1025"), ("accepted-valid", "fixed_1025")],
+            )
+            self.assertFalse(backup.exists())
+
     def test_manifest_publication_failure_restores_previous_target_and_manifest(self) -> None:
         """A failed manifest publish rolls a forced replacement back to the old coherent pair."""
         import ais_tanker_pipeline.environment.event_density_matcher as matcher

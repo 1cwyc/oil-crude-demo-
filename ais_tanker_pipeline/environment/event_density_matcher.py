@@ -123,12 +123,22 @@ def read_accepted_events(config: DensityConfig) -> list[EventRecord]:
 def validate_density_output(
     path: Path,
     expected_rows: int,
-    density_range: tuple[float, float] = (990.0, 1050.0),
+    density_range: tuple[float, float] | None = (990.0, 1050.0),
 ) -> dict[str, int | float | None]:
     """Validate the compact Parquet public contract and return its QA summary."""
-    lower, upper = density_range
-    if not lower < upper:
-        raise ValueError("density range must be strictly increasing")
+    if density_range is None:
+        invalid_density_predicate = "NOT isfinite(seawater_density_kg_m3)"
+        parameters: list[object] = [str(path)]
+    else:
+        lower, upper = density_range
+        if not lower < upper:
+            raise ValueError("density range must be strictly increasing")
+        invalid_density_predicate = (
+            "NOT isfinite(seawater_density_kg_m3) "
+            "OR seawater_density_kg_m3 < ? "
+            "OR seawater_density_kg_m3 > ?"
+        )
+        parameters = [lower, upper, str(path)]
     connection = duckdb.connect()
     try:
         described = connection.execute(
@@ -147,17 +157,15 @@ def validate_density_output(
                    count(*) FILTER (WHERE event_id IS NULL OR event_id = '') AS invalid_event_id,
                    count(*) FILTER (WHERE seawater_density_kg_m3 IS NULL) AS null_density,
                    count(*) FILTER (WHERE seawater_density_kg_m3 IS NOT NULL AND (
-                       NOT isfinite(seawater_density_kg_m3)
-                       OR seawater_density_kg_m3 < ?
-                       OR seawater_density_kg_m3 > ?
+                       {invalid_density_predicate}
                    )) AS invalid_density,
                    count(*) FILTER (WHERE density_method = 'teos10') AS teos10,
                    count(*) FILTER (WHERE density_method = 'fixed_1025') AS fixed_1025,
                    count(*) FILTER (WHERE density_method IS NULL OR density_method NOT IN ('teos10', 'fixed_1025')) AS invalid_method,
                    min(seawater_density_kg_m3), median(seawater_density_kg_m3), max(seawater_density_kg_m3)
             FROM read_parquet(?)
-            """,
-            [lower, upper, str(path)],
+            """.format(invalid_density_predicate=invalid_density_predicate),
+            parameters,
         ).fetchone()
     finally:
         connection.close()
@@ -426,15 +434,11 @@ def _write_manifest_atomic(manifest_path: Path, manifest: dict[str, Any]) -> Non
         raise
 
 
-def _manifest_matches_file(
-    manifest: object, path: Path, config: DensityConfig
-) -> bool:
+def _manifest_matches_file(manifest: object, path: Path) -> bool:
     if not _is_manifest(manifest) or not path.exists():
         return False
     try:
-        summary = validate_density_output(
-            path, manifest["counts"]["rows"], config.density_valid_range_kg_m3
-        )
+        summary = validate_density_output(path, manifest["counts"]["rows"], None)
         counts = {
             "rows": summary["rows"],
             "teos10": summary["teos10"],
@@ -480,7 +484,7 @@ def _recover_publication(
         raise OutputConflict("ambiguous density publication remnants require manual inspection")
 
     target_matches = _matching_output_summary(manifest, target, config) is not None
-    backup_matches = _manifest_matches_file(manifest, backup, config)
+    backup_matches = _manifest_matches_file(manifest, backup)
     if target_matches:
         _cleanup_known_remnants(target, manifest_path)
         return
@@ -488,7 +492,7 @@ def _recover_publication(
         if target.exists():
             target.unlink()
         os.replace(backup, target)
-        if _matching_output_summary(manifest, target, config) is None:
+        if not _manifest_matches_file(manifest, target):
             raise RuntimeError("recovered density backup failed publication verification")
         _cleanup_known_remnants(target, manifest_path)
         return
