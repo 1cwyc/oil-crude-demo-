@@ -27,6 +27,9 @@ from ais_tanker_pipeline.artifacts import (
 from ais_tanker_pipeline.draught.config import DraughtConfig, load_draught_config, month_range
 
 
+DRAUGHT_STATE_ALGORITHM_VERSION = "1.1.0"
+
+
 @dataclass(frozen=True)
 class DraughtObservation:
     crude_vessel_id: str
@@ -204,6 +207,7 @@ def _state_from_segment(segment: list[DraughtObservation], config: DraughtConfig
     median_m = float(median(item.draught_m for item in segment))
     identifier = "ds1:" + canonical_hash(
         {
+            "algorithm_version": DRAUGHT_STATE_ALGORITHM_VERSION,
             "crude_vessel_id": segment[0].crude_vessel_id,
             "state_start_s": start_s,
             "state_end_s": end_s,
@@ -323,6 +327,7 @@ def run_draught_state_builder(
         isinstance(existing, dict)
         and existing.get("status") == "complete"
         and existing.get("module_name") == "draught_state_builder"
+        and existing.get("algorithm_version") == DRAUGHT_STATE_ALGORITHM_VERSION
         and existing.get("config_hash") == config.config_hash
         and existing.get("inputs") == inputs
         and [item["path"] for item in existing.get("outputs", [])] == [str(path) for path in targets]
@@ -335,7 +340,8 @@ def run_draught_state_builder(
         _write_states(target_states, target)
     outputs = [{**file_signature(path), "sha256": sha256_file(path)} for path in targets]
     manifest = {
-        "status": "complete", "module_name": "draught_state_builder", "config_hash": config.config_hash,
+        "status": "complete", "module_name": "draught_state_builder",
+        "algorithm_version": DRAUGHT_STATE_ALGORITHM_VERSION, "config_hash": config.config_hash,
         "months": list(months), "inputs": inputs, "outputs": outputs,
         "counts": {
             "states": len(states), "observations": observation_count,

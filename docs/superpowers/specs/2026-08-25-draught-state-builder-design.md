@@ -59,7 +59,7 @@ minimum_state_duration_hours: 6
 minimum_state_observations: 3
 ```
 
-版本 1 固定上述阈值；未知、重复或缺失配置字段均失败关闭，规范化配置进入 manifest 哈希。
+版本 1 固定上述阈值；未知、重复或缺失配置字段均失败关闭，规范化配置进入 manifest 哈希。算法版本为 `1.1.0`，用于标识同 IMO 同刻中位数归并规则，进入 manifest 和状态 ID。
 
 从参考表读取：`crude_vessel_id` (VARCHAR)、`imo` (VARCHAR)、`mmsi` (INTEGER)。`imo` 和 `crude_vessel_id` 必须非空且唯一；重复 MMSI 保留为歧义，不能用于兜底。
 
