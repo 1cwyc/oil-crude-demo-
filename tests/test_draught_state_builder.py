@@ -181,7 +181,9 @@ class DraughtObservationTests(unittest.TestCase):
                 ["mmsi", "receive_time_s", "imo", "draught_m", "dq_mask"],
             )
 
-            with self.assertRaisesRegex(ValueError, "conflicting draught observations"):
+            with self.assertRaisesRegex(
+                ValueError, r"conflicting draught observations: vessel=imo:9424209, receive_time_s=100, range_m=12.0-12.5"
+            ):
                 read_matched_observations(reference, [static], valid_range=(1.0, 30.0), tolerance_m=0.30)
 
     def test_rejects_static_schema_without_imo_before_matching(self) -> None:

@@ -67,6 +67,13 @@ def _require_column_types(
         raise ValueError(f"{label} wrong types: {', '.join(wrong)}")
 
 
+def _conflicting_draught_error(vessel_id: str, receive_time_s: int, values: list[float]) -> ValueError:
+    return ValueError(
+        "conflicting draught observations: "
+        f"vessel={vessel_id}, receive_time_s={receive_time_s}, range_m={min(values)}-{max(values)}"
+    )
+
+
 def iter_matched_observations(
     reference_path: str | Path,
     static_paths: Iterable[str | Path],
@@ -134,14 +141,14 @@ def iter_matched_observations(
                     next_vessel_id, next_receive_time_s, next_draught_m = str(row[0]), int(row[1]), float(row[2])
                     if vessel_id is not None and (next_vessel_id, next_receive_time_s) != (vessel_id, receive_time_s):
                         if max(values) - min(values) > tolerance_m:
-                            raise ValueError("conflicting draught observations")
+                            raise _conflicting_draught_error(vessel_id, receive_time_s, values)
                         yield DraughtObservation(vessel_id, receive_time_s, float(median(values)))
                         values = []
                     vessel_id, receive_time_s = next_vessel_id, next_receive_time_s
                     values.append(next_draught_m)
             if vessel_id is not None:
                 if max(values) - min(values) > tolerance_m:
-                    raise ValueError("conflicting draught observations")
+                    raise _conflicting_draught_error(vessel_id, receive_time_s, values)
                 yield DraughtObservation(vessel_id, receive_time_s, float(median(values)))
         finally:
             connection.close()
