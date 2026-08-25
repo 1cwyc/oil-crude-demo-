@@ -1001,7 +1001,7 @@ git commit -m "feat: calculate event seawater density"
 
 **Interfaces:**
 - Consumes: Task 1 artifact primitives, Task 2 source catalog, and Task 4 event calculation.
-- Produces: `ALGORITHM_VERSION = "1.0.0"`, `event_parquet_files(config: DensityConfig) -> tuple[Path, ...]`, `read_accepted_events(config: DensityConfig) -> list[EventRecord]`, `validate_density_output(path: Path, expected_rows: int) -> dict[str, int | float | None]`, and `run_density_matcher(config: DensityConfig, force: bool = False, dry_run: bool = False) -> dict[str, object]`.
+- Produces: `ALGORITHM_VERSION = "1.1.0"`, `event_parquet_files(config: DensityConfig) -> tuple[Path, ...]`, `read_accepted_events(config: DensityConfig) -> list[EventRecord]`, `validate_density_output(path: Path, expected_rows: int) -> dict[str, int | float | None]`, and `run_density_matcher(config: DensityConfig, force: bool = False, dry_run: bool = False) -> dict[str, object]`.
 - Writes: `config.output_root/environment/event_seawater_density/event_seawater_density.parquet` and `config.output_root/reports/manifests/event_density_matcher.json`.
 - Manifest fingerprint: full SHA-256 of the event Parquet, each ERA5 file, each WOA23 file, and canonical configuration; output validity also checks the current output file signature.
 
@@ -1096,7 +1096,7 @@ Expected: `ERROR` because `ais_tanker_pipeline.environment.event_density_matcher
 In `event_density_matcher.py`, define the schema and reader exactly:
 
 ```python
-ALGORITHM_VERSION = "1.0.0"
+ALGORITHM_VERSION = "1.1.0"
 REQUIRED_EVENT_COLUMNS = {
     "event_id", "event_status", "event_start_s", "event_end_s",
     "event_longitude_deg", "event_latitude_deg",

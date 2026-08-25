@@ -43,6 +43,13 @@ _UniqueKeyLoader.add_constructor(
 )
 
 
+_VERSION_ONE_RANGES = {
+    "salinity_valid_range": (0.0, 50.0),
+    "sst_valid_range_c": (-5.0, 47.0),
+    "density_valid_range_kg_m3": (990.0, 1050.0),
+}
+
+
 @dataclass(frozen=True)
 class DensityConfig:
     path: Path
@@ -153,6 +160,16 @@ def load_density_config(path: str | Path) -> DensityConfig:
     salinity_range = _range(raw, "salinity_valid_range")
     sst_range = _range(raw, "sst_valid_range_c")
     density_range = _range(raw, "density_valid_range_kg_m3")
+    configured_ranges = {
+        "salinity_valid_range": salinity_range,
+        "sst_valid_range_c": sst_range,
+        "density_valid_range_kg_m3": density_range,
+    }
+    for key, expected in _VERSION_ONE_RANGES.items():
+        if configured_ranges[key] != expected:
+            raise ValueError(
+                f"version 1 requires {key}=[{expected[0]:g}, {expected[1]:g}]"
+            )
     normalized: dict[str, Any] = {
         "events_path": str(events_path),
         "output_root": str(output_root),

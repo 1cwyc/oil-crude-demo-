@@ -289,6 +289,29 @@ class DensityConfigTests(unittest.TestCase):
             self.assertEqual(first.config_hash, second.config_hash)
             json.dumps(first.raw)
 
+    def test_rejects_any_change_to_version_one_physical_ranges(self) -> None:
+        cases = (
+            ("salinity_valid_range", [0, 100], "widened"),
+            ("sst_valid_range_c", [-100, 100], "widened"),
+            ("density_valid_range_kg_m3", [0, 2000], "widened"),
+            ("salinity_valid_range", [1, 50], "narrowed"),
+            ("sst_valid_range_c", [-5, 46], "narrowed"),
+            ("density_valid_range_kg_m3", [991, 1050], "narrowed"),
+        )
+        for field, value, change in cases:
+            with self.subTest(field=field, change=change), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                era, woa = write_complete_sources(root)
+                config_path = write_density_config(root, [era], woa)
+                raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+                raw[field] = value
+                config_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+                with self.assertRaisesRegex(
+                    ValueError,
+                    f"version 1 requires {field}",
+                ):
+                    load_density_config(config_path)
+
 
 class SourceContractTests(unittest.TestCase):
     def test_grid_slice_rejects_non_one_dimensional_or_nonfinite_coordinates(self) -> None:
@@ -1134,6 +1157,26 @@ class DensityBatchManifestAndPublishTests(unittest.TestCase):
             self.assertEqual(current["gsw_version"], matcher.gsw.__version__)
             self.assertNotEqual(current["run_id"], first_run_id)
 
+    def test_version_one_manifest_cannot_skip_version_one_point_one(self) -> None:
+        """An old algorithm version cannot authorize reuse under changed source semantics."""
+        import ais_tanker_pipeline.environment.event_density_matcher as matcher
+        from ais_tanker_pipeline.artifacts import OutputConflict
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config, report = self._build(root)
+            manifest_path = Path(report["manifest_path"])
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["algorithm_version"] = "1.0.0"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            with self.assertRaises(OutputConflict):
+                matcher.run_density_matcher(config)
+            rebuilt = matcher.run_density_matcher(config, force=True)
+            self.assertEqual(rebuilt["action"], "built")
+            current = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(current["algorithm_version"], "1.1.0")
+
 
 class DensityBatchCrashRecoveryTests(unittest.TestCase):
     @staticmethod
@@ -1250,42 +1293,31 @@ class DensityBatchCrashRecoveryTests(unittest.TestCase):
             self.assertFalse(staging.exists())
             self.assertFalse(backup.exists())
 
-    def test_old_range_backup_recovers_before_new_range_conflict_and_force_rebuild(self) -> None:
-        """Recovery proves the old publication by its manifest, not the current density range."""
+    def test_backup_recovers_before_changed_input_conflict_and_force_rebuild(self) -> None:
+        """Recovery proves the old publication before current input authorization is checked."""
         from ais_tanker_pipeline.artifacts import OutputConflict
         from ais_tanker_pipeline.environment.event_density_matcher import run_density_matcher
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            old_config, report = self._build(root)
+            config, report = self._build(root)
             target, _, _, backup, _ = self._paths(report)
             old_output = target.read_bytes()
             os.replace(target, backup)
 
-            raw = yaml.safe_load(old_config.path.read_text(encoding="utf-8"))
-            raw["density_valid_range_kg_m3"] = [990, 1025.5]
-            old_config.path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
-            new_config = load_density_config(old_config.path)
+            write_events(
+                root / "events.parquet",
+                DensityBatchTests._rows()
+                + [("new", "accepted", 1751328000, 1751331600, 0.0, 0.0)],
+            )
 
             with self.assertRaises(OutputConflict):
-                run_density_matcher(new_config)
+                run_density_matcher(config)
             self.assertEqual(target.read_bytes(), old_output)
             self.assertFalse(backup.exists())
 
-            rebuilt = run_density_matcher(new_config, force=True)
-            self.assertEqual(rebuilt["counts"], {"rows": 2, "teos10": 0, "fixed_1025": 2})
-            connection = duckdb.connect()
-            try:
-                methods = connection.execute(
-                    "SELECT event_id, density_method FROM read_parquet(?) ORDER BY event_id",
-                    [str(target)],
-                ).fetchall()
-            finally:
-                connection.close()
-            self.assertEqual(
-                methods,
-                [("accepted-fallback", "fixed_1025"), ("accepted-valid", "fixed_1025")],
-            )
+            rebuilt = run_density_matcher(config, force=True)
+            self.assertEqual(rebuilt["counts"], {"rows": 3, "teos10": 2, "fixed_1025": 1})
             self.assertFalse(backup.exists())
 
     def test_manifest_publication_failure_restores_previous_target_and_manifest(self) -> None:
@@ -1538,6 +1570,48 @@ class DensityCliTests(unittest.TestCase):
                 self.assertEqual(completed.returncode, 2)
                 self.assertEqual(completed.stdout, "")
                 self.assertTrue(completed.stderr.startswith("ERROR:"))
+                self.assertNotIn("Traceback", completed.stderr)
+
+    def test_module_cli_rejects_changes_to_version_one_physical_ranges(self) -> None:
+        cases = (
+            ("salinity_valid_range", [0, 100], "widened"),
+            ("sst_valid_range_c", [-100, 100], "widened"),
+            ("density_valid_range_kg_m3", [0, 2000], "widened"),
+            ("salinity_valid_range", [1, 50], "narrowed"),
+            ("sst_valid_range_c", [-5, 46], "narrowed"),
+            ("density_valid_range_kg_m3", [991, 1050], "narrowed"),
+        )
+        for field, value, change in cases:
+            with self.subTest(field=field, change=change), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                config_path = write_density_config(
+                    root,
+                    [root / "not-opened-era.nc"],
+                    {
+                        f"{month:02d}": root / f"not-opened-woa-{month}.nc"
+                        for month in range(1, 13)
+                    },
+                )
+                raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+                raw[field] = value
+                config_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "ais_tanker_pipeline.environment.event_density_matcher",
+                        "--config",
+                        str(config_path),
+                        "--dry-run",
+                    ],
+                    cwd=Path(__file__).resolve().parents[1],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(completed.returncode, 2)
+                self.assertEqual(completed.stdout, "")
+                self.assertIn(f"ERROR: version 1 requires {field}", completed.stderr)
                 self.assertNotIn("Traceback", completed.stderr)
 
     def test_cli_prints_only_json_for_a_controlled_source_error(self) -> None:
