@@ -117,9 +117,9 @@ def test_uses_imo_before_conflicting_unique_mmsi(self) -> None:
     observations = read_matched_observations(reference, [static])
     self.assertEqual(observations[0].crude_vessel_id, "imo:9468853")
 
-def test_rejects_same_vessel_same_time_conflicting_draught(self) -> None:
-    with self.assertRaisesRegex(ValueError, "conflicting draught observations"):
-        read_matched_observations(reference, [static])
+def test_merges_same_imo_same_time_reports_by_median(self) -> None:
+    observations = read_matched_observations(reference, [static])
+    self.assertEqual(observations[0].draught_m, 5.4)
 
 def test_drops_zero_and_out_of_range_draught_without_copying_static_rows(self) -> None:
     observations = read_matched_observations(reference, [static])
@@ -148,7 +148,7 @@ LEFT JOIN unique_mmsi AS mmsi_match ON static.mmsi = mmsi_match.mmsi
 WHERE coalesce(imo_match.crude_vessel_id, mmsi_match.crude_vessel_id) IS NOT NULL
 ```
 
-Validate every static file has the required typed columns; reject NULL keys and duplicate raw `(mmsi, receive_time_s)` keys. Deduplicate only exact physical-identity/time/draught retransmissions; reject within-time values differing by more than `state_tolerance_m`.
+Validate every static file has the required typed columns. Aggregate all valid reports for the same matched IMO/time by median, counting only groups with a spread greater than `state_tolerance_m` in the manifest; keep the state-segmentation tolerance unchanged.
 
 - [ ] **Step 4: Run observation tests**
 

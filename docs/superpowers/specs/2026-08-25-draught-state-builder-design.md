@@ -36,7 +36,7 @@
 
 - `draught_m` 的有效物理范围固定为 `(1.0, 30.0] m`；下限排除常见 AIS 零值哨兵，上限只过滤显然错误。
 - 连续观测间隔不超过 48 h、同段吃水极差不超过 0.30 m、至少持续 6 h 且至少 3 条观测，才构成稳定状态。
-- 同一物理船同刻报告不同吃水且差异超过 0.30 m 为不可解释冲突，阻断运行。
+- 同一有效 IMO、同刻的有效吃水直接取中位数；其极差超过 0.30 m 时不阻断，而在 manifest 记录冲突归并汇总。稳定状态段的 0.30 m 容差保持严格。
 
 ### 实施后验收
 
@@ -70,7 +70,7 @@ minimum_state_observations: 3
 1. 静态 `imo` 与参考 `imo` 精确匹配时优先；未命中时仅匹配参考表唯一 MMSI。
 2. 相同 IMO 的不同静态 MMSI 统一为同一 `crude_vessel_id`；IMO/MMSI 冲突时 IMO 胜出；歧义 MMSI 未命中时丢弃并在 manifest 计数。
 3. 仅保留有限且处于 `(1.0, 30.0]` 的 `draught_m`。无效值不成为状态，也不修改原始静态表。
-4. 对同一 `crude_vessel_id`、`receive_time_s`、吃水完全相同的重传去重；同刻不同吃水相差超过容差时阻断。
+4. 对同一有效 IMO、同一 `receive_time_s` 的全部有效吃水报告直接取中位数；即使组内极差超过 0.30 m 也不阻断。极差超过 0.30 m 的这类组记为一次冲突归并，并记录其最大极差。没有有效 IMO 的 MMSI 兜底同刻组仍按原容差失败关闭；该归并不放宽后续稳定状态段的 0.30 m 容差。
 5. 按物理船和 UTC 时间排序。相邻观测若间隔不超过 48 h 且扩展后本段吃水极差不超过 0.30 m，则属于同一候选段；否则切段。
 6. 仅发布持续至少 6 h 且至少 3 条观测的候选段；状态区间为首末观测时刻闭区间，吃水为段内中位数。
 7. `draught_state_id` 由算法版本、`crude_vessel_id`、首末时刻和中位数的规范化值确定性生成。状态不得重叠；任何重叠、空值或主键重复阻断发布。
@@ -96,7 +96,7 @@ reports/manifests/draught_state_builder_YYYY-MM_YYYY-MM.json
 
 不落盘原始吃水、MMSI、IMO、观测数、极差、质量位、匹配方法或 confidence。它们只用于计算、测试和 manifest 汇总。
 
-manifest 记录算法版本、请求月份、配置哈希、所有输入签名/SHA256、输出签名/SHA256、有效观测数、IMO/MMSI 匹配数、无效/歧义/短状态数和输出状态数。
+manifest 记录算法版本、请求月份、配置哈希、所有输入签名/SHA256、输出签名/SHA256、有效观测数、IMO/MMSI 匹配数、无效/歧义/短状态数、`imo_timestamp_conflict_merged_groups`、`imo_timestamp_conflict_merged_max_spread_m` 和输出状态数。
 
 ## 6. CLI、幂等与恢复
 
@@ -110,7 +110,7 @@ python -m ais_tanker_pipeline.draught.draught_state_builder `
 
 ## 7. TDD 与真实月验收
 
-先写失败测试，至少覆盖：IMO 优先、唯一/歧义 MMSI、零值和越界吃水、同刻冲突、容差切段、48 h 间隙、6 h/3观测门槛、确定 ID、状态不重叠、schema gate、幂等和 backup 恢复。
+先写失败测试，至少覆盖：IMO 优先、唯一/歧义 MMSI、零值和越界吃水、同 IMO 同刻中位数归并及 manifest 审计、容差切段、48 h 间隙、6 h/3观测门槛、确定 ID、状态不重叠、schema gate、幂等和 backup 恢复。
 
 2025-09 验收要求：
 

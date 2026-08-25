@@ -54,7 +54,7 @@ reference/crude_vessels + static AIS 吃水 → 稳定吃水状态 sidecar（dra
 & .\.venv\Scripts\python.exe -m ais_tanker_pipeline.draught.draught_state_builder --config $env:AIS_DRAUGHT_CONFIG --start-month 2025-09 --end-month 2025-09
 ```
 
-输出为 `draught/draught_states/year=YYYY/month=MM/draught_states.parquet`，严格仅 `draught_state_id`、`crude_vessel_id`、`state_start_s`、`state_end_s`、`draught_median_m`；同一运行范围的 manifest 位于 `reports/manifests/`。输入 schema、同船同刻矛盾吃水、已有不一致产物均失败关闭；相同输入幂等跳过，人工核查后可使用 `--force`。
+输出为 `draught/draught_states/year=YYYY/month=MM/draught_states.parquet`，严格仅 `draught_state_id`、`crude_vessel_id`、`state_start_s`、`state_end_s`、`draught_median_m`；同一运行范围的 manifest 位于 `reports/manifests/`。输入 schema、没有有效 IMO 的同刻矛盾吃水、已有不一致产物均失败关闭；同一有效 IMO 的同刻有效吃水则取中位数，超过 0.3 m 的归并组数和最大极差仅记入 manifest。相同输入幂等跳过，人工核查后可使用 `--force`。
 
 当前流程以 Python、DuckDB 和 Zstandard Parquet 为主。详细算法与限制见 [技术说明](docs/技术说明.md)。
 

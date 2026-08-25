@@ -168,8 +168,8 @@ class DraughtObservationTests(unittest.TestCase):
 
         self.assertEqual([(item.crude_vessel_id, item.receive_time_s, item.draught_m) for item in observations], [("imo:9468853", 100, 12.0)])
 
-    def test_rejects_same_vessel_same_time_conflicting_draught(self) -> None:
-        """Fails if contradictory static reports can become two candidate states at the same instant."""
+    def test_merges_same_imo_same_time_reports_by_median(self) -> None:
+        """Fails if a valid IMO's simultaneous reports stop the month instead of yielding their median."""
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             reference = root / "reference.parquet"
@@ -177,14 +177,16 @@ class DraughtObservationTests(unittest.TestCase):
             write_parquet(reference, [("imo:9424209", "9424209", 111)], ["crude_vessel_id", "imo", "mmsi"])
             write_parquet(
                 static,
-                [(111, 100, "9424209", 12.0, 0), (111, 100, "9424209", 12.5, 0)],
+                [(111, 100, "9424209", 12.0, 0), (222, 100, "9424209", 12.5, 0)],
                 ["mmsi", "receive_time_s", "imo", "draught_m", "dq_mask"],
             )
 
-            with self.assertRaisesRegex(
-                ValueError, r"conflicting draught observations: vessel=imo:9424209, receive_time_s=100, range_m=12.0-12.5"
-            ):
-                read_matched_observations(reference, [static], valid_range=(1.0, 30.0), tolerance_m=0.30)
+            observations = read_matched_observations(reference, [static], valid_range=(1.0, 30.0), tolerance_m=0.30)
+
+        self.assertEqual(
+            [(item.crude_vessel_id, item.receive_time_s, item.draught_m) for item in observations],
+            [("imo:9424209", 100, 12.25)],
+        )
 
     def test_rejects_static_schema_without_imo_before_matching(self) -> None:
         """Fails if schema drift can silently bypass IMO-priority physical identity resolution."""
@@ -274,6 +276,35 @@ class DraughtReducerTests(unittest.TestCase):
 
 
 class DraughtArtifactTests(unittest.TestCase):
+    def test_records_same_imo_conflict_median_summary_in_manifest(self) -> None:
+        """Fails if a wide simultaneous IMO spread is merged but cannot be audited from the manifest."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reference = root / "reference.parquet"
+            static = root / "static" / "year=2025" / "month=09" / "date=2025-09-01" / "static.parquet"
+            static.parent.mkdir(parents=True)
+            write_parquet(reference, [("imo:9424209", "9424209", 111)], ["crude_vessel_id", "imo", "mmsi"])
+            write_parquet(
+                static,
+                [
+                    (111, 0, "9424209", 5.1, 0),
+                    (222, 0, "9424209", 5.7, 0),
+                    (111, 3 * 3600, "9424209", 5.4, 0),
+                    (111, 6 * 3600, "9424209", 5.4, 0),
+                ],
+                ["mmsi", "receive_time_s", "imo", "draught_m", "dq_mask"],
+            )
+            config = DraughtConfig(
+                root / "config.yaml", reference, root / "static", root / "derived", (1.0, 30.0), 0.30, 48.0, 6.0, 3,
+                {"test": "config"},
+            )
+
+            result = run_draught_state_builder(config, "2025-09", "2025-09")
+            manifest = json.loads(Path(result["manifest_path"]).read_text(encoding="utf-8"))
+
+        self.assertEqual(manifest["counts"]["imo_timestamp_conflict_merged_groups"], 1)
+        self.assertAlmostEqual(manifest["counts"]["imo_timestamp_conflict_merged_max_spread_m"], 0.6)
+
     def test_publishes_month_state_sidecar_and_skips_identical_inputs(self) -> None:
         """Fails if stable states are not published as a minimal idempotent monthly artifact."""
         with tempfile.TemporaryDirectory() as temporary:

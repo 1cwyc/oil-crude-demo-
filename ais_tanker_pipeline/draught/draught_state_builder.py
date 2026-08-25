@@ -43,6 +43,12 @@ class DraughtState:
     draught_median_m: float
 
 
+@dataclass
+class ObservationAudit:
+    imo_timestamp_conflict_merged_groups: int = 0
+    imo_timestamp_conflict_merged_max_spread_m: float = 0.0
+
+
 def _parquet_paths(paths: Iterable[str | Path]) -> tuple[Path, ...]:
     resolved = tuple(sorted((Path(path).resolve() for path in paths), key=str))
     if not resolved or any(not path.is_file() for path in resolved):
@@ -80,12 +86,30 @@ def iter_matched_observations(
     *,
     valid_range: tuple[float, float],
     tolerance_m: float,
+    audit: ObservationAudit | None = None,
 ) -> Iterable[DraughtObservation]:
     """Yield only valid static draught observations in physical-identity/time order."""
     reference = Path(reference_path).resolve()
     static = _parquet_paths(static_paths)
     if not reference.is_file():
         raise ValueError("reference_path must be a Parquet file")
+    observation_audit = audit if audit is not None else ObservationAudit()
+
+    def merged_observation(
+        vessel_id: str, receive_time_s: int, imo_values: list[float], fallback_values: list[float]
+    ) -> DraughtObservation:
+        if imo_values:
+            spread_m = max(imo_values) - min(imo_values)
+            if spread_m > tolerance_m:
+                observation_audit.imo_timestamp_conflict_merged_groups += 1
+                observation_audit.imo_timestamp_conflict_merged_max_spread_m = max(
+                    observation_audit.imo_timestamp_conflict_merged_max_spread_m, round(spread_m, 6)
+                )
+            return DraughtObservation(vessel_id, receive_time_s, float(median(imo_values)))
+        if max(fallback_values) - min(fallback_values) > tolerance_m:
+            raise _conflicting_draught_error(vessel_id, receive_time_s, fallback_values)
+        return DraughtObservation(vessel_id, receive_time_s, float(median(fallback_values)))
+
     def stream() -> Iterable[DraughtObservation]:
         connection = duckdb.connect()
         try:
@@ -123,7 +147,8 @@ def iter_matched_observations(
                 HAVING count(*) = 1
             )
             SELECT coalesce(imo_match.crude_vessel_id, mmsi_match.crude_vessel_id),
-                   static.receive_time_s, static.draught_m
+                   static.receive_time_s, static.draught_m,
+                   imo_match.crude_vessel_id IS NOT NULL AS matched_by_imo
             FROM read_parquet(?) AS static
             LEFT JOIN read_parquet(?) AS imo_match ON trim(static.imo) = imo_match.imo
             LEFT JOIN unique_mmsi AS mmsi_match ON static.mmsi = mmsi_match.mmsi
@@ -135,21 +160,20 @@ def iter_matched_observations(
             )
             vessel_id: str | None = None
             receive_time_s: int | None = None
-            values: list[float] = []
+            imo_values: list[float] = []
+            fallback_values: list[float] = []
             while rows := cursor.fetchmany(100_000):
                 for row in rows:
-                    next_vessel_id, next_receive_time_s, next_draught_m = str(row[0]), int(row[1]), float(row[2])
+                    next_vessel_id, next_receive_time_s, next_draught_m, matched_by_imo = (
+                        str(row[0]), int(row[1]), float(row[2]), bool(row[3])
+                    )
                     if vessel_id is not None and (next_vessel_id, next_receive_time_s) != (vessel_id, receive_time_s):
-                        if max(values) - min(values) > tolerance_m:
-                            raise _conflicting_draught_error(vessel_id, receive_time_s, values)
-                        yield DraughtObservation(vessel_id, receive_time_s, float(median(values)))
-                        values = []
+                        yield merged_observation(vessel_id, receive_time_s, imo_values, fallback_values)
+                        imo_values, fallback_values = [], []
                     vessel_id, receive_time_s = next_vessel_id, next_receive_time_s
-                    values.append(next_draught_m)
+                    (imo_values if matched_by_imo else fallback_values).append(next_draught_m)
             if vessel_id is not None:
-                if max(values) - min(values) > tolerance_m:
-                    raise _conflicting_draught_error(vessel_id, receive_time_s, values)
-                yield DraughtObservation(vessel_id, receive_time_s, float(median(values)))
+                yield merged_observation(vessel_id, receive_time_s, imo_values, fallback_values)
         finally:
             connection.close()
 
@@ -272,12 +296,14 @@ def run_draught_state_builder(
         for path in (config.reference_path, *static_paths)
     ]
     observation_count = 0
+    observation_audit = ObservationAudit()
 
     def counted_observations() -> Iterable[DraughtObservation]:
         nonlocal observation_count
         for observation in iter_matched_observations(
             config.reference_path, static_paths,
             valid_range=config.draught_valid_range_m, tolerance_m=config.state_tolerance_m,
+            audit=observation_audit,
         ):
             observation_count += 1
             yield observation
@@ -311,7 +337,11 @@ def run_draught_state_builder(
     manifest = {
         "status": "complete", "module_name": "draught_state_builder", "config_hash": config.config_hash,
         "months": list(months), "inputs": inputs, "outputs": outputs,
-        "counts": {"states": len(states), "observations": observation_count},
+        "counts": {
+            "states": len(states), "observations": observation_count,
+            "imo_timestamp_conflict_merged_groups": observation_audit.imo_timestamp_conflict_merged_groups,
+            "imo_timestamp_conflict_merged_max_spread_m": observation_audit.imo_timestamp_conflict_merged_max_spread_m,
+        },
     }
     write_json_atomic(manifest_path, manifest)
     return {"action": "built", "output_paths": [str(path) for path in targets], "manifest_path": str(manifest_path), "counts": manifest["counts"]}
