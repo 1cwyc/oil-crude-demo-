@@ -2,7 +2,7 @@
 
 本文件帮助另一台电脑上的 Codex 快速确定模块边界。`crude_fleet_loader` 与 `event_density_matcher` 已实现正式 CLI；对密度模块而言，本 PRD/模块文档为权威，具体见当前已批准的 [事件海水密度匹配模块 PRD](superpowers/specs/2026-08-24-event-density-matcher-design.md)。 [数据字典与模块接口规格 v0.2](specs/AIS原油海运网络_数据字典与模块接口规格_v0.2.md) 是更广的总体设计；其中固定密度等描述已被当前已批准设计取代，旧版身份、爬虫和 DWT 预测描述也不适用于当前方案 A。
 
-除 `crude_fleet_loader` 与 `event_density_matcher` 外，下列增量模块仍为规划中的工作，尚未实现正式入口；特别是 `crude_fleet_matcher`、`event_detector_3h`、`voyage_builder`、`country_validation_builder` 仍未实现。实现任一未实现模块前必须检查真实仓库、浏览相关开源实现、编写独立 PRD 并取得用户确认。
+除 `crude_fleet_loader`、`crude_fleet_matcher` 与 `event_density_matcher` 外，下列增量模块仍为规划中的工作，尚未实现正式入口；特别是 `event_detector_3h`、`voyage_builder`、`country_validation_builder` 仍未实现。实现任一未实现模块前必须检查真实仓库、浏览相关开源实现、编写独立 PRD 并取得用户确认。
 
 ### `crude_fleet_loader`
 
@@ -13,6 +13,16 @@
 - **Run:** `python -m ais_tanker_pipeline.fleet.crude_fleet_loader --config $env:AIS_CRUDE_FLEET_CONFIG [--dry-run] [--force]`。
 - **Idempotency:** 相同输入、配置和输出 SHA256 跳过；冲突失败关闭；`--force` 使用原子重建并在 manifest 发布失败时恢复旧表。
 - **Downstream:** `crude_fleet_matcher`；下游只以 `crude_vessel_id` 连接该权威表。
+
+### `crude_fleet_matcher`
+
+- **Function:** 将单一权威 `reference/crude_vessels` 与一个 UTC 月的既有三小时 AIS 分区匹配；不复制完整位置表。
+- **Inputs:** 未版本化主机 YAML 中的 `reference_path`、`samples_root`、`output_root`；三小时样本必须有 `mmsi`、`target_time_s`、`registry_imo`，且 `(mmsi, target_time_s)` 唯一。
+- **Rules:** `registry_imo` 命中有效参考 IMO 时优先；否则仅在参考表的 MMSI 对应唯一 IMO 时兜底。不同 MMSI 的相同 IMO 始终映射同一 `crude_vessel_id`；参考表中歧义 MMSI 不兜底；IMO/MMSI 冲突时 IMO 胜出。
+- **Outputs:** `enrichment/crude_fleet_matches/year=YYYY/month=MM/crude_fleet_matches.parquet`，严格仅 `mmsi`、`target_time_s`、`crude_vessel_id`、`match_method`；每月 manifest 位于 `reports/manifests/crude_fleet_matcher_YYYY-MM.json`。
+- **QC:** 输入字段缺失、重复三小时键、空月分区、既有不一致输出均失败关闭。配置、输入指纹/SHA256、输出 SHA256 与匹配计数进入 manifest。
+- **Run:** `python -m ais_tanker_pipeline.fleet.crude_fleet_matcher --config $env:AIS_CRUDE_FLEET_MATCHER_CONFIG --month YYYY-MM [--dry-run] [--force]`。
+- **Downstream:** 三小时 AIS 原油船 DuckDB 视图、`draught_state_builder`、`event_detector_3h`。
 
 ### `schema_gate`
 

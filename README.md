@@ -17,6 +17,7 @@ POS .dat + 油轮登记 → 油轮位置
 油轮位置 → 三小时样本 → 可选 CSV/热力图
 外部已接受装卸事件 + ERA5/WOA23 → event_seawater_density sidecar（event_density_matcher CLI）
 外部原油船单 CSV → reference/crude_vessels（crude_fleet_loader CLI）
+reference/crude_vessels + 三小时 AIS → 最小原油船 sidecar（crude_fleet_matcher CLI）
 ```
 
 `event_density_matcher` 已实现正式 CLI，但它只消费已存在的接受事件表；`event_detector_3h`、`voyage_builder`、`country_validation_builder` 仍未实现。其余下游模块也保持独立 PRD 后实施的边界。
@@ -31,6 +32,17 @@ POS .dat + 油轮登记 → 油轮位置
 ```
 
 相同输入会幂等跳过；输入、配置或输出不一致时失败关闭。仅在人工检查既有派生产物后可使用 `--force` 原子重建。
+
+## 原油船三小时匹配 sidecar
+
+`crude_fleet_matcher` 仅读取一个 UTC 月的既有 `samples_3h` 分区，按有效 IMO 优先、唯一 MMSI 兜底生成四列 sidecar，绝不复制位置字段。以 [配置模板](configs/fleet/crude_fleet_matcher.example.yaml) 在仓库外创建主机 YAML：
+
+```powershell
+& .\.venv\Scripts\python.exe -m ais_tanker_pipeline.fleet.crude_fleet_matcher --config $env:AIS_CRUDE_FLEET_MATCHER_CONFIG --month 2025-09 --dry-run
+& .\.venv\Scripts\python.exe -m ais_tanker_pipeline.fleet.crude_fleet_matcher --config $env:AIS_CRUDE_FLEET_MATCHER_CONFIG --month 2025-09
+```
+
+输出为 `enrichment/crude_fleet_matches/year=YYYY/month=MM/crude_fleet_matches.parquet`；正式 Parquet 严格仅 `mmsi`、`target_time_s`、`crude_vessel_id`、`match_method`。相同输入幂等跳过，冲突失败关闭，人工核查后可使用 `--force`。
 
 当前流程以 Python、DuckDB 和 Zstandard Parquet 为主。详细算法与限制见 [技术说明](docs/技术说明.md)。
 
