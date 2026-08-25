@@ -1,0 +1,3 @@
+reference_path: "${AIS_DERIVED_ROOT}/reference/crude_vessels/crude_vessels.parquet"
+samples_root: "${AIS_2025_09_ROOT}"
+output_root: "${AIS_DERIVED_ROOT}"
