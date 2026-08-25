@@ -71,6 +71,8 @@ def write_woa(
     units: str = "1",
     standard_name: str = "sea_water_practical_salinity",
     salinity: float = 35.0,
+    latitudes: np.ndarray | None = None,
+    longitudes: np.ndarray | None = None,
 ) -> None:
     values = np.full((1, 1, 3, 3), salinity, dtype=np.float32)
     dataset = xr.Dataset(
@@ -83,10 +85,14 @@ def write_woa(
             "depth_bnds": (("depth", "nbounds"), np.array([[0.0, 2.5]], dtype=np.float32)),
         },
         coords={
-            "time": np.array([float(month)]),
+            "time": (
+                "time",
+                np.array([167.5 + float(month)]),
+                {"units": "months since 1991-01-01 00:00:00"},
+            ),
             "depth": np.array([1.25]),
-            "lat": np.array([-90.0, 0.0, 90.0]),
-            "lon": np.array([-179.875, 0.0, 179.875]),
+            "lat": latitudes if latitudes is not None else np.array([-90.0, 0.0, 90.0]),
+            "lon": longitudes if longitudes is not None else np.array([-179.875, 0.0, 179.875]),
             "nbounds": np.array([0, 1]),
         },
     )
@@ -222,6 +228,67 @@ class DensityConfigTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "must not reuse a source file"):
                 load_density_config(write_density_config(root, [era], woa))
 
+    def test_rejects_unknown_fields_before_hashing_safe_loader_objects(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            era, woa = write_complete_sources(root)
+            config_path = write_density_config(root, [era], woa)
+            config_path.write_text(
+                config_path.read_text(encoding="utf-8")
+                + "operator_note: 2026-08-25\n"
+                + "audit_tags: !!set\n  reviewed: null\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "density config unknown fields: audit_tags, operator_note",
+            ):
+                load_density_config(config_path)
+
+    def test_config_hash_uses_only_the_normalized_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            era, woa = write_complete_sources(root)
+            first_path = write_density_config(root, [era], woa)
+            first_raw = yaml.safe_load(first_path.read_text(encoding="utf-8"))
+            first_raw.update(
+                {
+                    "events_path": "events.parquet",
+                    "output_root": "output",
+                    "era5_files": ["era.nc"],
+                    "woa23_monthly_files": {
+                        key: Path(value).name
+                        for key, value in first_raw["woa23_monthly_files"].items()
+                    },
+                }
+            )
+            first_path.write_text(yaml.safe_dump(first_raw, sort_keys=False), encoding="utf-8")
+
+            second_path = root / "density-absolute.yaml"
+            second_raw = copy.deepcopy(first_raw)
+            second_raw.update(
+                {
+                    "events_path": str((root / "events.parquet").resolve()),
+                    "output_root": str((root / "output").resolve()),
+                    "era5_files": [str(era.resolve())],
+                    "woa23_monthly_files": {
+                        key: str(path.resolve()) for key, path in woa.items()
+                    },
+                    "search_radius_km": 75.0,
+                    "fallback_density_kg_m3": 1025.0,
+                    "sea_pressure_dbar": 0.0,
+                    "salinity_valid_range": [0.0, 50.0],
+                    "sst_valid_range_c": [-5.0, 47.0],
+                    "density_valid_range_kg_m3": [990.0, 1050.0],
+                }
+            )
+            second_path.write_text(yaml.safe_dump(second_raw, sort_keys=False), encoding="utf-8")
+
+            first = load_density_config(first_path)
+            second = load_density_config(second_path)
+            self.assertEqual(first.config_hash, second.config_hash)
+            json.dumps(first.raw)
+
 
 class SourceContractTests(unittest.TestCase):
     def test_grid_slice_rejects_non_one_dimensional_or_nonfinite_coordinates(self) -> None:
@@ -289,6 +356,19 @@ class SourceContractTests(unittest.TestCase):
             salinity, _ = load_environment_month(catalog, "2025-12")
             self.assertAlmostEqual(float(salinity.values[0, 0]), 34.0)
 
+    def test_schema_gate_rejects_swapped_woa_natural_month_files(self) -> None:
+        """A YAML month key must not override the NetCDF time identity."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            era, woa = write_complete_sources(root)
+            woa["01"], woa["02"] = woa["02"], woa["01"]
+            config = load_density_config(write_density_config(root, [era], woa))
+            with self.assertRaisesRegex(
+                EnvironmentSourceError,
+                "WOA23 configured month 01 has natural month 02",
+            ):
+                build_source_catalog(config)
+
     def test_schema_gate_rejects_wrong_era_unit(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -332,6 +412,84 @@ class SourceContractTests(unittest.TestCase):
             config = load_density_config(write_density_config(root, [era], woa))
             with self.assertRaisesRegex(EnvironmentSourceError, "ERA5 longitude coordinate must be one-dimensional and finite"):
                 build_source_catalog(config)
+
+    def test_schema_gate_rejects_latitudes_outside_physical_range(self) -> None:
+        for source in ("ERA5", "WOA23"):
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                era, woa = write_complete_sources(root)
+                if source == "ERA5":
+                    write_era5(
+                        era,
+                        STUDY_MONTHS,
+                        latitudes=np.array([100.0, 0.0, -100.0]),
+                    )
+                else:
+                    write_woa(
+                        woa["01"],
+                        1,
+                        latitudes=np.array([-100.0, 0.0, 100.0]),
+                    )
+                config = load_density_config(write_density_config(root, [era], woa))
+                with self.assertRaisesRegex(
+                    EnvironmentSourceError,
+                    rf"{source} latitude coordinate must be within \[-90, 90\]",
+                ):
+                    build_source_catalog(config)
+
+    def test_schema_gate_rejects_era5_longitude_outside_zero_to_360(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            era, woa = write_complete_sources(root)
+            write_era5(
+                era,
+                STUDY_MONTHS,
+                longitudes=np.array([0.0, 359.75, 720.0]),
+            )
+            config = load_density_config(write_density_config(root, [era], woa))
+            with self.assertRaisesRegex(
+                EnvironmentSourceError,
+                r"ERA5 longitude coordinate must be within \[0, 360\)",
+            ):
+                build_source_catalog(config)
+
+    def test_schema_gate_rejects_mixed_or_out_of_range_woa_longitudes(self) -> None:
+        cases = {
+            "mixed": np.array([-179.875, 180.0, 359.75]),
+            "out-of-range": np.array([0.0, 359.75, 720.0]),
+        }
+        for name, longitudes in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                era, woa = write_complete_sources(root)
+                write_woa(woa["01"], 1, longitudes=longitudes)
+                config = load_density_config(write_density_config(root, [era], woa))
+                with self.assertRaisesRegex(
+                    EnvironmentSourceError,
+                    r"WOA23 longitude coordinate must use either \[-180, 180\) or \[0, 360\)",
+                ):
+                    build_source_catalog(config)
+
+    def test_schema_gate_accepts_valid_descending_coordinate_axes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            era, woa = write_complete_sources(root)
+            write_era5(
+                era,
+                STUDY_MONTHS,
+                latitudes=np.array([90.0, 0.0, -90.0]),
+                longitudes=np.array([359.75, 180.0, 0.0]),
+            )
+            for month in range(1, 13):
+                write_woa(
+                    woa[f"{month:02d}"],
+                    month,
+                    latitudes=np.array([90.0, 0.0, -90.0]),
+                    longitudes=np.array([179.875, 0.0, -179.875]),
+                )
+            config = load_density_config(write_density_config(root, [era], woa))
+            catalog = build_source_catalog(config)
+            self.assertEqual(set(catalog.woa23_by_month), set(range(1, 13)))
 
     def test_load_rejects_infinite_source_values(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -954,6 +1112,28 @@ class DensityBatchManifestAndPublishTests(unittest.TestCase):
             self.assertEqual(manifest_path.read_bytes(), manifest_before)
             self.assertEqual(list(target.parent.glob("*.partial-*.parquet")), [])
 
+    def test_gsw_version_mismatch_blocks_skip_and_force_rebuilds(self) -> None:
+        """A manifest created by another GSW version cannot authorize skip."""
+        import ais_tanker_pipeline.environment.event_density_matcher as matcher
+        from ais_tanker_pipeline.artifacts import OutputConflict
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config, report = self._build(root)
+            manifest_path = Path(report["manifest_path"])
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            first_run_id = manifest["run_id"]
+            manifest["gsw_version"] = "0.0.0-review-mismatch"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            with self.assertRaises(OutputConflict):
+                matcher.run_density_matcher(config)
+            rebuilt = matcher.run_density_matcher(config, force=True)
+            self.assertEqual(rebuilt["action"], "built")
+            current = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(current["gsw_version"], matcher.gsw.__version__)
+            self.assertNotEqual(current["run_id"], first_run_id)
+
 
 class DensityBatchCrashRecoveryTests(unittest.TestCase):
     @staticmethod
@@ -1028,6 +1208,47 @@ class DensityBatchCrashRecoveryTests(unittest.TestCase):
             self.assertFalse(staging.exists())
             self.assertFalse(backup.exists())
             self.assertFalse(manifest_partial.exists())
+
+    def test_first_build_staging_only_requires_force_then_rebuilds(self) -> None:
+        """Only force may discard the deterministic remnant of an unpublished first build."""
+        from ais_tanker_pipeline.artifacts import OutputConflict
+        from ais_tanker_pipeline.environment.event_density_matcher import run_density_matcher
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            events = root / "events.parquet"
+            write_events(events, DensityBatchTests._rows())
+            config = DensityBatchHardeningTests._config(root, events, root / "output")
+            target = (
+                config.output_root
+                / "environment"
+                / "event_seawater_density"
+                / "event_seawater_density.parquet"
+            )
+            manifest = (
+                config.output_root
+                / "reports"
+                / "manifests"
+                / "event_density_matcher.json"
+            )
+            staging = target.with_name(f"{target.stem}.staging{target.suffix}")
+            backup = target.with_name(f"{target.stem}.backup{target.suffix}")
+            staging.parent.mkdir(parents=True, exist_ok=True)
+            staging.write_bytes(b"unpublished first-build staging")
+
+            with self.assertRaises(OutputConflict):
+                run_density_matcher(config)
+            self.assertTrue(staging.exists())
+            self.assertFalse(target.exists())
+            self.assertFalse(manifest.exists())
+            self.assertFalse(backup.exists())
+
+            rebuilt = run_density_matcher(config, force=True)
+            self.assertEqual(rebuilt["action"], "built")
+            self.assertTrue(target.exists())
+            self.assertTrue(manifest.exists())
+            self.assertFalse(staging.exists())
+            self.assertFalse(backup.exists())
 
     def test_old_range_backup_recovers_before_new_range_conflict_and_force_rebuild(self) -> None:
         """Recovery proves the old publication by its manifest, not the current density range."""
@@ -1214,6 +1435,57 @@ class DensityCliTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 2)
             self.assertEqual(completed.stdout, "")
             self.assertTrue(completed.stderr.startswith("ERROR:"))
+            self.assertNotIn("Traceback", completed.stderr)
+
+    def test_module_cli_rejects_unknown_safe_loader_objects_at_load_time(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config_path = write_density_config(
+                root,
+                [root / "not-opened-era.nc"],
+                {
+                    f"{month:02d}": root / f"not-opened-woa-{month}.nc"
+                    for month in range(1, 13)
+                },
+            )
+            config_path.write_text(
+                config_path.read_text(encoding="utf-8")
+                + "operator_note: 2026-08-25\n"
+                + "audit_tags: !!set\n  reviewed: null\n",
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                code = main(["--config", str(config_path), "--dry-run"])
+            self.assertEqual(code, 2)
+            self.assertEqual(stdout.getvalue(), "")
+            self.assertIn(
+                "ERROR: density config unknown fields: audit_tags, operator_note",
+                stderr.getvalue(),
+            )
+            self.assertNotIn("Traceback", stderr.getvalue())
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "ais_tanker_pipeline.environment.event_density_matcher",
+                    "--config",
+                    str(config_path),
+                    "--dry-run",
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 2)
+            self.assertEqual(completed.stdout, "")
+            self.assertIn(
+                "ERROR: density config unknown fields: audit_tags, operator_note",
+                completed.stderr,
+            )
             self.assertNotIn("Traceback", completed.stderr)
 
     def test_cli_normalizes_unhashable_yaml_mapping_key(self) -> None:

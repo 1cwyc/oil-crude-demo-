@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 
 import numpy as np
 import xarray as xr
@@ -17,6 +18,12 @@ STUDY_MONTHS = tuple(
 
 class EnvironmentSourceError(RuntimeError):
     """Raised for a dataset-level contract failure that must stop the module."""
+
+
+_MONTHS_SINCE_PATTERN = re.compile(
+    r"^\s*months\s+since\s+\d{4}-(\d{2})-\d{2}(?:[ T].*)?\s*$",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -71,11 +78,57 @@ def _require_monotonic(values: np.ndarray, label: str) -> None:
         raise EnvironmentSourceError(f"{label} coordinate must be strictly monotonic")
 
 
+def _require_latitude_range(values: np.ndarray, label: str) -> None:
+    if not np.all((values >= -90.0) & (values <= 90.0)):
+        raise EnvironmentSourceError(
+            f"{label} latitude coordinate must be within [-90, 90]"
+        )
+
+
+def _require_era5_longitude_range(values: np.ndarray) -> None:
+    if not np.all((values >= 0.0) & (values < 360.0)):
+        raise EnvironmentSourceError(
+            "ERA5 longitude coordinate must be within [0, 360)"
+        )
+
+
+def _require_woa_longitude_convention(values: np.ndarray) -> None:
+    signed = np.all((values >= -180.0) & (values < 180.0))
+    unsigned = np.all((values >= 0.0) & (values < 360.0))
+    if not (signed or unsigned):
+        raise EnvironmentSourceError(
+            "WOA23 longitude coordinate must use either [-180, 180) or [0, 360)"
+        )
+
+
 def _require_global_coverage(latitudes: np.ndarray, longitudes: np.ndarray, label: str) -> None:
     if float(np.min(latitudes)) > -89.0 or float(np.max(latitudes)) < 89.0:
         raise EnvironmentSourceError(f"{label} latitude does not cover the globe")
     if float(np.max(longitudes)) - float(np.min(longitudes)) < 359.0:
         raise EnvironmentSourceError(f"{label} longitude does not cover the globe")
+
+
+def _woa_natural_month(dataset: xr.Dataset) -> int:
+    time = dataset["time"]
+    if time.size != 1:
+        raise EnvironmentSourceError("WOA23 must contain exactly one time coordinate")
+    units = time.attrs.get("units")
+    match = _MONTHS_SINCE_PATTERN.fullmatch(units) if isinstance(units, str) else None
+    if match is None:
+        raise EnvironmentSourceError(
+            "WOA23 time units must use 'months since YYYY-MM-DD'"
+        )
+    origin_month = int(match.group(1))
+    if not 1 <= origin_month <= 12:
+        raise EnvironmentSourceError("WOA23 time units contain an invalid origin month")
+    try:
+        offset = float(np.asarray(time.values).reshape(-1)[0])
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise EnvironmentSourceError("WOA23 time coordinate must be numeric") from exc
+    if not np.isfinite(offset):
+        raise EnvironmentSourceError("WOA23 time coordinate must be finite")
+    month_offset = int(np.floor(offset))
+    return (origin_month - 1 + month_offset) % 12 + 1
 
 
 def build_source_catalog(config: DensityConfig) -> SourceCatalog:
@@ -93,6 +146,8 @@ def build_source_catalog(config: DensityConfig) -> SourceCatalog:
                     raise EnvironmentSourceError("sst dimensions must be valid_time, latitude, longitude")
                 _require_monotonic(dataset["latitude"].values, "ERA5 latitude")
                 _require_monotonic(dataset["longitude"].values, "ERA5 longitude")
+                _require_latitude_range(dataset["latitude"].values, "ERA5")
+                _require_era5_longitude_range(dataset["longitude"].values)
                 _require_global_coverage(dataset["latitude"].values, dataset["longitude"].values, "ERA5")
                 for index, value in enumerate(dataset["valid_time"].values):
                     month = str(np.datetime64(value, "M"))
@@ -109,7 +164,7 @@ def build_source_catalog(config: DensityConfig) -> SourceCatalog:
     for month, path in config.woa23_monthly_files.items():
         try:
             with xr.open_dataset(path, engine="h5netcdf", decode_times=False) as dataset:
-                required = {"s_an", "lat", "lon", "depth"}
+                required = {"s_an", "time", "lat", "lon", "depth"}
                 missing = sorted(required.difference(dataset.variables))
                 if missing:
                     raise EnvironmentSourceError(f"WOA23 month {month:02d} missing variables: {', '.join(missing)}")
@@ -122,11 +177,18 @@ def build_source_catalog(config: DensityConfig) -> SourceCatalog:
                     raise EnvironmentSourceError("s_an dimensions must be time, depth, lat, lon")
                 if variable.sizes["time"] != 1 or not np.isclose(float(dataset["depth"].values[0]), 1.25):
                     raise EnvironmentSourceError("WOA23 must contain one time and the 1.25 m surface layer")
+                natural_month = _woa_natural_month(dataset)
+                if natural_month != month:
+                    raise EnvironmentSourceError(
+                        f"WOA23 configured month {month:02d} has natural month {natural_month:02d}"
+                    )
                 bounds_name = dataset["depth"].attrs.get("bounds")
                 if bounds_name not in dataset or not np.allclose(dataset[bounds_name].values[0], [0.0, 2.5]):
                     raise EnvironmentSourceError("WOA23 surface depth bounds must be 0 to 2.5 m")
                 _require_monotonic(dataset["lat"].values, "WOA23 latitude")
                 _require_monotonic(dataset["lon"].values, "WOA23 longitude")
+                _require_latitude_range(dataset["lat"].values, "WOA23")
+                _require_woa_longitude_convention(dataset["lon"].values)
                 _require_global_coverage(dataset["lat"].values, dataset["lon"].values, "WOA23")
         except EnvironmentSourceError:
             raise

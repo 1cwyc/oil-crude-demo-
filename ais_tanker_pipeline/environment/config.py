@@ -115,6 +115,13 @@ def load_density_config(path: str | Path) -> DensityConfig:
         "search_radius_km", "fallback_density_kg_m3", "sea_pressure_dbar",
         "salinity_valid_range", "sst_valid_range_c", "density_valid_range_kg_m3",
     }
+    unknown = sorted(
+        (key for key in raw if key not in required),
+        key=lambda key: str(key),
+    )
+    if unknown:
+        labels = [key if isinstance(key, str) else repr(key) for key in unknown]
+        raise ValueError(f"density config unknown fields: {', '.join(labels)}")
     missing = sorted(required.difference(raw))
     if missing:
         raise ValueError(f"density config missing fields: {', '.join(missing)}")
@@ -141,17 +148,37 @@ def load_density_config(path: str | Path) -> DensityConfig:
     pressure = _number(raw, "sea_pressure_dbar")
     if radius != 75.0 or fallback != 1025.0 or pressure != 0.0:
         raise ValueError("version 1 requires radius=75, fallback=1025, pressure=0")
+    events_path = _path_value(config_path, raw["events_path"], "events_path")
+    output_root = _path_value(config_path, raw["output_root"], "output_root")
+    salinity_range = _range(raw, "salinity_valid_range")
+    sst_range = _range(raw, "sst_valid_range_c")
+    density_range = _range(raw, "density_valid_range_kg_m3")
+    normalized: dict[str, Any] = {
+        "events_path": str(events_path),
+        "output_root": str(output_root),
+        "era5_files": [str(path) for path in era5],
+        "woa23_monthly_files": {
+            f"{month:02d}": str(source_path)
+            for month, source_path in sorted(woa.items())
+        },
+        "search_radius_km": radius,
+        "fallback_density_kg_m3": fallback,
+        "sea_pressure_dbar": pressure,
+        "salinity_valid_range": list(salinity_range),
+        "sst_valid_range_c": list(sst_range),
+        "density_valid_range_kg_m3": list(density_range),
+    }
     return DensityConfig(
         path=config_path,
-        events_path=_path_value(config_path, raw["events_path"], "events_path"),
-        output_root=_path_value(config_path, raw["output_root"], "output_root"),
+        events_path=events_path,
+        output_root=output_root,
         era5_files=era5,
         woa23_monthly_files=woa,
         search_radius_km=radius,
         fallback_density_kg_m3=fallback,
         sea_pressure_dbar=pressure,
-        salinity_valid_range=_range(raw, "salinity_valid_range"),
-        sst_valid_range_c=_range(raw, "sst_valid_range_c"),
-        density_valid_range_kg_m3=_range(raw, "density_valid_range_kg_m3"),
-        raw=raw,
+        salinity_valid_range=salinity_range,
+        sst_valid_range_c=sst_range,
+        density_valid_range_kg_m3=density_range,
+        raw=normalized,
     )

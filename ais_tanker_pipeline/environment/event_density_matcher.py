@@ -520,6 +520,16 @@ def _recover_publication(
         raise OutputConflict("unverified density backup requires manual inspection")
     if has_remnants and not force:
         raise OutputConflict("ambiguous density publication remnants require --force or manual inspection")
+    if (
+        force
+        and staging.exists()
+        and not target.exists()
+        and not manifest_path.exists()
+        and not backup.exists()
+        and not _manifest_partial_path(manifest_path).exists()
+    ):
+        staging.unlink()
+        return
     if force and target.exists() and read_manifest(manifest_path) is None:
         staging.unlink(missing_ok=True)
         _manifest_partial_path(manifest_path).unlink(missing_ok=True)
@@ -557,6 +567,7 @@ def run_density_matcher(
         manifest_is_valid
         and existing["config_hash"] == config.config_hash
         and existing["input_fingerprint"] == fingerprint
+        and existing["gsw_version"] == gsw.__version__
         and _typed_equal(existing["inputs"], inputs)
         and output_summary is not None
     )
