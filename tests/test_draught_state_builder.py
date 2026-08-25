@@ -4,9 +4,28 @@ from pathlib import Path
 import tempfile
 import unittest
 
+import duckdb
+import pandas as pd
 import yaml
 
-from ais_tanker_pipeline.draught.config import load_draught_config, month_range
+from ais_tanker_pipeline.draught.config import DraughtConfig, load_draught_config, month_range
+from ais_tanker_pipeline.draught.draught_state_builder import DraughtObservation, build_draught_states, read_matched_observations
+
+
+def write_parquet(path: Path, rows: list[tuple[object, ...]], columns: list[str]) -> None:
+    connection = duckdb.connect()
+    try:
+        connection.register("rows", pd.DataFrame(rows, columns=columns))
+        connection.execute("COPY rows TO ? (FORMAT PARQUET)", [str(path)])
+    finally:
+        connection.close()
+
+
+def state_config() -> DraughtConfig:
+    return DraughtConfig(
+        Path("config.yaml"), Path("reference.parquet"), Path("static"), Path("derived"),
+        (1.0, 30.0), 0.30, 48.0, 6.0, 3, {},
+    )
 
 
 class DraughtConfigTests(unittest.TestCase):
@@ -68,6 +87,78 @@ class DraughtConfigTests(unittest.TestCase):
     def test_enumerates_an_inclusive_month_range(self) -> None:
         """Fails if a requested end month is skipped when processing annual inputs."""
         self.assertEqual(month_range("2025-09", "2025-11"), ("2025-09", "2025-10", "2025-11"))
+
+
+class DraughtObservationTests(unittest.TestCase):
+    def test_prefers_imo_and_filters_invalid_draught(self) -> None:
+        """Fails if a conflicting MMSI can override IMO or zero draught becomes a stable observation."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reference = root / "reference.parquet"
+            static = root / "static.parquet"
+            write_parquet(
+                reference,
+                [("imo:9424209", "9424209", 111), ("imo:9468853", "9468853", 222)],
+                ["crude_vessel_id", "imo", "mmsi"],
+            )
+            write_parquet(
+                static,
+                [(111, 100, "9468853", 12.0, 0), (222, 200, None, 0.0, 0)],
+                ["mmsi", "receive_time_s", "imo", "draught_m", "dq_mask"],
+            )
+
+            observations = read_matched_observations(reference, [static], valid_range=(1.0, 30.0), tolerance_m=0.30)
+
+        self.assertEqual([(item.crude_vessel_id, item.receive_time_s, item.draught_m) for item in observations], [("imo:9468853", 100, 12.0)])
+
+    def test_rejects_same_vessel_same_time_conflicting_draught(self) -> None:
+        """Fails if contradictory static reports can become two candidate states at the same instant."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reference = root / "reference.parquet"
+            static = root / "static.parquet"
+            write_parquet(reference, [("imo:9424209", "9424209", 111)], ["crude_vessel_id", "imo", "mmsi"])
+            write_parquet(
+                static,
+                [(111, 100, "9424209", 12.0, 0), (111, 100, "9424209", 12.5, 0)],
+                ["mmsi", "receive_time_s", "imo", "draught_m", "dq_mask"],
+            )
+
+            with self.assertRaisesRegex(ValueError, "conflicting draught observations"):
+                read_matched_observations(reference, [static], valid_range=(1.0, 30.0), tolerance_m=0.30)
+
+
+class DraughtReducerTests(unittest.TestCase):
+    def test_publishes_a_six_hour_three_observation_stable_state(self) -> None:
+        """Fails if a qualifying stable state is discarded or its median is not preserved."""
+        states = build_draught_states(
+            [
+                DraughtObservation("imo:9424209", 0, 12.0),
+                DraughtObservation("imo:9424209", 3 * 3600, 12.2),
+                DraughtObservation("imo:9424209", 6 * 3600, 12.1),
+            ],
+            state_config(),
+        )
+
+        self.assertEqual(len(states), 1)
+        self.assertEqual(
+            (states[0].crude_vessel_id, states[0].state_start_s, states[0].state_end_s, states[0].draught_median_m),
+            ("imo:9424209", 0, 6 * 3600, 12.1),
+        )
+
+    def test_does_not_bridge_a_gap_larger_than_forty_eight_hours(self) -> None:
+        """Fails if stale static reports create a false continuous draught state."""
+        states = build_draught_states(
+            [
+                DraughtObservation("imo:9424209", 0, 12.0),
+                DraughtObservation("imo:9424209", 3 * 3600, 12.0),
+                DraughtObservation("imo:9424209", 6 * 3600, 12.0),
+                DraughtObservation("imo:9424209", 55 * 3600, 12.0),
+            ],
+            state_config(),
+        )
+
+        self.assertEqual([(item.state_start_s, item.state_end_s) for item in states], [(0, 6 * 3600)])
 
 
 if __name__ == "__main__":
