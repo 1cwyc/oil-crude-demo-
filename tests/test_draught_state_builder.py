@@ -130,6 +130,26 @@ class DraughtConfigTests(unittest.TestCase):
 
 
 class DraughtObservationTests(unittest.TestCase):
+    def test_rejects_reference_with_null_mmsi_before_matching(self) -> None:
+        """Fails if a declared MMSI fallback identity can silently become unusable."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reference = root / "reference.parquet"
+            static = root / "static.parquet"
+            connection = duckdb.connect()
+            try:
+                connection.execute(
+                    "COPY (SELECT CAST('imo:9424209' AS VARCHAR) AS crude_vessel_id, "
+                    "CAST('9424209' AS VARCHAR) AS imo, CAST(NULL AS INTEGER) AS mmsi) TO ? (FORMAT PARQUET)",
+                    [str(reference)],
+                )
+            finally:
+                connection.close()
+            write_parquet(static, [(111, 100, "9424209", 12.0, 0)], ["mmsi", "receive_time_s", "imo", "draught_m", "dq_mask"])
+
+            with self.assertRaisesRegex(ValueError, "crude fleet reference contains NULL or empty crude_vessel_id/imo/mmsi"):
+                read_matched_observations(reference, [static], valid_range=(1.0, 30.0), tolerance_m=0.30)
+
     def test_rejects_a_reference_with_duplicate_imo_before_joining_static_reports(self) -> None:
         """Fails if a duplicated reference IMO can multiply one static report into false states."""
         with tempfile.TemporaryDirectory() as temporary:
@@ -165,6 +185,22 @@ class DraughtObservationTests(unittest.TestCase):
                 connection.close()
 
             with self.assertRaisesRegex(ValueError, "static AIS contains NULL mmsi or receive_time_s"):
+                read_matched_observations(reference, [static], valid_range=(1.0, 30.0), tolerance_m=0.30)
+
+    def test_rejects_duplicate_fallback_mmsi_time_reports(self) -> None:
+        """Fails if duplicate reports without a valid IMO silently change an MMSI fallback median."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reference = root / "reference.parquet"
+            static = root / "static.parquet"
+            write_parquet(reference, [("imo:9424209", "9424209", 111)], ["crude_vessel_id", "imo", "mmsi"])
+            write_parquet(
+                static,
+                [(111, 100, "unknown", 12.0, 0), (111, 100, "unknown", 12.1, 0)],
+                ["mmsi", "receive_time_s", "imo", "draught_m", "dq_mask"],
+            )
+
+            with self.assertRaisesRegex(ValueError, "duplicate fallback MMSI/time observations"):
                 read_matched_observations(reference, [static], valid_range=(1.0, 30.0), tolerance_m=0.30)
 
     def test_yields_matched_observations_incrementally(self) -> None:
@@ -431,6 +467,41 @@ class DraughtArtifactTests(unittest.TestCase):
             self.assertTrue(october_output.is_file())
             manifest = json.loads(Path(rebuilt["manifest_path"]).read_text(encoding="utf-8"))
             self.assertEqual([item["path"] for item in manifest["outputs"]], [str(october_output)])
+
+    def test_recovers_retired_partition_backup_after_manifest_commit(self) -> None:
+        """Fails if an interruption after a shrinking rebuild strands a verified retired backup forever."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reference = root / "reference.parquet"
+            september = root / "static" / "year=2025" / "month=09" / "date=2025-09-01" / "static.parquet"
+            october = root / "static" / "year=2025" / "month=10" / "date=2025-10-01" / "static.parquet"
+            september.parent.mkdir(parents=True)
+            october.parent.mkdir(parents=True)
+            write_parquet(reference, [("imo:9424209", "9424209", 111)], ["crude_vessel_id", "imo", "mmsi"])
+            september_start = int(datetime(2025, 9, 1, tzinfo=timezone.utc).timestamp())
+            october_start = int(datetime(2025, 10, 1, tzinfo=timezone.utc).timestamp())
+            rows = lambda start: [(111, start, "9424209", 12.0, 0), (111, start + 3 * 3600, "9424209", 12.1, 0), (111, start + 6 * 3600, "9424209", 12.2, 0)]
+            write_parquet(september, rows(september_start), ["mmsi", "receive_time_s", "imo", "draught_m", "dq_mask"])
+            write_parquet(october, rows(october_start), ["mmsi", "receive_time_s", "imo", "draught_m", "dq_mask"])
+            config = DraughtConfig(
+                root / "config.yaml", reference, root / "static", root / "derived", (1.0, 30.0), 0.30, 48.0, 6.0, 3,
+                {"test": "config"},
+            )
+            first = run_draught_state_builder(config, "2025-09", "2025-10")
+            september_output = next(Path(path) for path in first["output_paths"] if "month=09" in path)
+            retired_bytes = september_output.read_bytes()
+            write_parquet(september, [(111, september_start, "9424209", 12.0, 0)], ["mmsi", "receive_time_s", "imo", "draught_m", "dq_mask"])
+            rebuilt = run_draught_state_builder(config, "2025-09", "2025-10", force=True)
+            backup = september_output.with_name(f"{september_output.stem}.backup{september_output.suffix}")
+            backup.write_bytes(retired_bytes)
+            retired_hash = draught_state_builder.sha256_file(backup)
+            manifest = json.loads(Path(rebuilt["manifest_path"]).read_text(encoding="utf-8"))
+
+            recovered = run_draught_state_builder(config, "2025-09", "2025-10")
+
+            self.assertEqual(manifest["retired_output_backups"], [{"path": str(september_output), "sha256": retired_hash}])
+            self.assertEqual(recovered["action"], "skipped")
+            self.assertFalse(backup.exists())
 
     def test_records_same_imo_conflict_median_summary_in_manifest(self) -> None:
         """Fails if a wide simultaneous IMO spread is merged but cannot be audited from the manifest."""

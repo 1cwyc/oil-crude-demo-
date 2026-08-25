@@ -78,11 +78,12 @@ def _require_column_types(
 
 def _require_reference_identity_contract(connection: duckdb.DuckDBPyConnection, reference: Path) -> None:
     null_identities = connection.execute(
-        "SELECT count(*) FROM read_parquet(?) WHERE crude_vessel_id IS NULL OR trim(crude_vessel_id) = '' OR imo IS NULL OR trim(imo) = ''",
+        "SELECT count(*) FROM read_parquet(?) WHERE crude_vessel_id IS NULL OR trim(crude_vessel_id) = '' "
+        "OR imo IS NULL OR trim(imo) = '' OR mmsi IS NULL",
         [str(reference)],
     ).fetchone()[0]
     if null_identities:
-        raise ValueError("crude fleet reference contains NULL or empty crude_vessel_id/imo")
+        raise ValueError("crude fleet reference contains NULL or empty crude_vessel_id/imo/mmsi")
     for column in ("crude_vessel_id", "imo"):
         duplicates = connection.execute(
             f"SELECT count(*) FROM (SELECT {column} FROM read_parquet(?) GROUP BY {column} HAVING count(*) > 1)",
@@ -134,6 +135,8 @@ def iter_matched_observations(
                     observation_audit.imo_timestamp_conflict_merged_max_spread_m, round(spread_m, 6)
                 )
             return DraughtObservation(vessel_id, receive_time_s, float(median(imo_values)))
+        if len(fallback_values) > 1:
+            raise ValueError("duplicate fallback MMSI/time observations")
         if max(fallback_values) - min(fallback_values) > tolerance_m:
             raise _conflicting_draught_error(vessel_id, receive_time_s, fallback_values)
         return DraughtObservation(vessel_id, receive_time_s, float(median(fallback_values)))
@@ -349,6 +352,23 @@ def _manifest_output_targets(manifest: object) -> tuple[Path, ...]:
     return tuple(targets)
 
 
+def _retired_backup_records(manifest: object) -> tuple[tuple[Path, str], ...]:
+    """Return former target hashes retained only to finish an interrupted cleanup."""
+    if not isinstance(manifest, dict):
+        return ()
+    records = manifest.get("retired_output_backups", [])
+    if not isinstance(records, list):
+        raise OutputConflict("invalid retired draught state backup records prevent recovery")
+    parsed: list[tuple[Path, str]] = []
+    for record in records:
+        if not isinstance(record, dict) or not isinstance(record.get("path"), str) or not isinstance(record.get("sha256"), str):
+            raise OutputConflict("invalid retired draught state backup record prevents recovery")
+        parsed.append((Path(record["path"]), record["sha256"]))
+    if len({path for path, _ in parsed}) != len(parsed):
+        raise OutputConflict("duplicate retired draught state backup record prevents recovery")
+    return tuple(parsed)
+
+
 def _recover_draught_publication(manifest_path: Path) -> None:
     """Restore manifest-verified state partitions from an interrupted replacement."""
     manifest = read_manifest(manifest_path)
@@ -370,6 +390,14 @@ def _recover_draught_publication(manifest_path: Path) -> None:
         os.replace(backup, target)
         if not _target_matches_manifest(manifest, target):
             raise OutputConflict("recovered draught state backup failed verification")
+    for target, expected_hash in _retired_backup_records(manifest):
+        backup = target.with_name(f"{target.stem}.backup{target.suffix}")
+        if target.exists():
+            raise OutputConflict("retired draught state target remains after manifest publication")
+        if backup.exists():
+            if sha256_file(backup) != expected_hash:
+                raise OutputConflict("unverified retired draught state backup requires manual inspection")
+            backup.unlink()
 
 
 def _manifest_authorizes_skip(
@@ -430,6 +458,17 @@ def _publish_staged_states(
     else:
         for backup in backups.values():
             backup.unlink(missing_ok=True)
+
+
+def _retired_output_backups(manifest: object, retired_targets: tuple[Path, ...]) -> list[dict[str, str]]:
+    """Persist old hashes until a post-manifest cleanup can be safely retried."""
+    records: list[dict[str, str]] = []
+    for target in retired_targets:
+        expected_hash = _manifest_output_hash(manifest, target)
+        if expected_hash is None:
+            raise OutputConflict("retired draught state target lacks a manifest SHA256")
+        records.append({"path": str(target), "sha256": expected_hash})
+    return records
 
 
 def run_draught_state_builder(
@@ -501,6 +540,7 @@ def run_draught_state_builder(
         "status": "complete", "module_name": "draught_state_builder",
         "algorithm_version": DRAUGHT_STATE_ALGORITHM_VERSION, "config_hash": config.config_hash,
         "months": list(months), "inputs": inputs, "outputs": outputs,
+        "retired_output_backups": _retired_output_backups(existing, retired_targets),
         "counts": {
             "states": len(states), "observations": observation_count,
             "imo_timestamp_conflict_merged_groups": observation_audit.imo_timestamp_conflict_merged_groups,

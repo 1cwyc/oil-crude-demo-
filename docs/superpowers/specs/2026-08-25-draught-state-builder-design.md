@@ -61,9 +61,9 @@ minimum_state_observations: 3
 
 版本 1 固定上述阈值；未知、重复或缺失配置字段均失败关闭，规范化配置进入 manifest 哈希。算法版本为 `1.1.1`，用于标识同 IMO 同刻中位数归并及关键键 gate，进入 manifest 和状态 ID。
 
-从参考表读取：`crude_vessel_id` (VARCHAR)、`imo` (VARCHAR)、`mmsi` (INTEGER)。`imo` 和 `crude_vessel_id` 必须非空且唯一；重复 MMSI 保留为歧义，不能用于兜底。
+从参考表读取：`crude_vessel_id` (VARCHAR)、`imo` (VARCHAR)、`mmsi` (INTEGER)。三者必须非空；`imo` 和 `crude_vessel_id` 必须唯一；重复 MMSI 保留为歧义，不能用于兜底。
 
-从请求的 UTC 月范围读取静态字段：`mmsi` (INTEGER)、`receive_time_s` (BIGINT)、`imo` (VARCHAR)、`draught_m` (DOUBLE)、`dq_mask` (UBIGINT)。所有日 Parquet 都须满足合同；空分区、NULL 的 MMSI/时间、重复键或类型漂移阻断运行。
+从请求的 UTC 月范围读取静态字段：`mmsi` (INTEGER)、`receive_time_s` (BIGINT)、`imo` (VARCHAR)、`draught_m` (DOUBLE)、`dq_mask` (UBIGINT)。所有日 Parquet 都须满足合同；空分区、NULL 的 MMSI/时间或类型漂移阻断运行。同一有效 IMO/时刻的报告（包括原始 `(mmsi, receive_time_s)` 重复）按正式中位数规则归并；不具有效 IMO 的重复键仍阻断运行。
 
 ## 4. 匹配、清洗与状态规则
 
@@ -106,7 +106,7 @@ python -m ais_tanker_pipeline.draught.draught_state_builder `
   --start-month 2025-09 --end-month 2025-09 [--dry-run] [--force]
 ```
 
-`--dry-run` 只解析配置和显示目标，不打开 Parquet。相同输入、范围、配置和输出 SHA256 幂等跳过；不一致输出失败关闭。`--force` 仅用于人工核查后的冲突重建。发布采用 temporary → target 与 manifest 原子写入：强制重建会把旧 manifest 有、而新 manifest 不再拥有的分区一并备份后删除；启动时若 target 已匹配当前 manifest，则清理遗留旧 backup，否则仅可依据当前 manifest SHA256 恢复已验证 backup，其他残留失败关闭。
+`--dry-run` 只解析配置和显示目标，不打开 Parquet。相同输入、范围、配置和输出 SHA256 幂等跳过；不一致输出失败关闭。`--force` 仅用于人工核查后的冲突重建。发布采用 temporary → target 与 manifest 原子写入：强制重建会把旧 manifest 有、而新 manifest 不再拥有的分区一并备份后删除，且将其旧 SHA256 作为仅恢复用途的 manifest 元数据保留；启动时若 target 已匹配当前 manifest，则清理遗留旧 backup，否则仅可依据当前 manifest SHA256 恢复已验证 backup，其他残留失败关闭。
 
 ## 7. TDD 与真实月验收
 
