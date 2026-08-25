@@ -335,6 +335,20 @@ def _target_matches_manifest(manifest: object, target: Path) -> bool:
         return False
 
 
+def _manifest_output_targets(manifest: object) -> tuple[Path, ...]:
+    """Return the complete output set owned by a valid draught manifest."""
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("outputs"), list):
+        return ()
+    targets: list[Path] = []
+    for output in manifest["outputs"]:
+        if not isinstance(output, dict) or not isinstance(output.get("path"), str):
+            raise OutputConflict("invalid draught state manifest output prevents publication")
+        targets.append(Path(output["path"]))
+    if len(set(targets)) != len(targets):
+        raise OutputConflict("duplicate draught state manifest output prevents publication")
+    return tuple(targets)
+
+
 def _recover_draught_publication(manifest_path: Path) -> None:
     """Restore manifest-verified state partitions from an interrupted replacement."""
     manifest = read_manifest(manifest_path)
@@ -347,12 +361,12 @@ def _recover_draught_publication(manifest_path: Path) -> None:
         backup = target.with_name(f"{target.stem}.backup{target.suffix}")
         if not backup.exists():
             continue
-        expected_hash = _manifest_output_hash(manifest, target)
-        if expected_hash is None or sha256_file(backup) != expected_hash:
-            raise OutputConflict("unverified draught state backup requires manual inspection")
         if _target_matches_manifest(manifest, target):
             backup.unlink()
             continue
+        expected_hash = _manifest_output_hash(manifest, target)
+        if expected_hash is None or sha256_file(backup) != expected_hash:
+            raise OutputConflict("unverified draught state backup requires manual inspection")
         os.replace(backup, target)
         if not _target_matches_manifest(manifest, target):
             raise OutputConflict("recovered draught state backup failed verification")
@@ -382,9 +396,12 @@ def _manifest_authorizes_skip(
     )
 
 
-def _publish_staged_states(staged: dict[Path, Path], manifest_path: Path, manifest: dict[str, object]) -> None:
+def _publish_staged_states(
+    staged: dict[Path, Path], retired_targets: tuple[Path, ...], manifest_path: Path, manifest: dict[str, object]
+) -> None:
     """Atomically replace all state partitions or restore the previous manifest-backed set."""
-    backups = {target: target.with_name(f"{target.stem}.backup{target.suffix}") for target in staged}
+    targets = tuple(sorted(set(staged).union(retired_targets), key=str))
+    backups = {target: target.with_name(f"{target.stem}.backup{target.suffix}") for target in targets}
     if any(backup.exists() for backup in backups.values()):
         raise OutputConflict("draught state recovery backup exists; inspect it before rebuilding")
     moved_previous: set[Path] = set()
@@ -428,6 +445,7 @@ def run_draught_state_builder(
         for path in (config.reference_path, *static_paths)
     ]
     existing = read_manifest(manifest_path)
+    previous_targets = _manifest_output_targets(existing)
     if _manifest_authorizes_skip(existing, config, months, inputs):
         return {
             "action": "skipped",
@@ -464,11 +482,12 @@ def run_draught_state_builder(
         and existing.get("algorithm_version") == DRAUGHT_STATE_ALGORITHM_VERSION
         and existing.get("config_hash") == config.config_hash
         and existing.get("inputs") == inputs
-        and [item["path"] for item in existing.get("outputs", [])] == [str(path) for path in targets]
+        and [str(path) for path in previous_targets] == [str(path) for path in targets]
         and all(item.get("sha256") == sha256_file(Path(item["path"])) for item in existing.get("outputs", []))
     ):
         return {"action": "skipped", "output_paths": [str(path) for path in targets], "manifest_path": str(manifest_path), "counts": existing["counts"]}
-    if (manifest_path.exists() or any(path.exists() for path in targets)) and not force:
+    retired_targets = tuple(path for path in previous_targets if path not in targets)
+    if (manifest_path.exists() or any(path.exists() for path in (*targets, *retired_targets))) and not force:
         raise OutputConflict("draught state output already exists; inspect it before rebuilding")
     staged = {target: _stage_states(grouped[target], target) for target in targets}
     outputs = [
@@ -488,7 +507,7 @@ def run_draught_state_builder(
             "imo_timestamp_conflict_merged_max_spread_m": observation_audit.imo_timestamp_conflict_merged_max_spread_m,
         },
     }
-    _publish_staged_states(staged, manifest_path, manifest)
+    _publish_staged_states(staged, retired_targets, manifest_path, manifest)
     return {"action": "built", "output_paths": [str(path) for path in targets], "manifest_path": str(manifest_path), "counts": manifest["counts"]}
 
 

@@ -106,11 +106,11 @@ python -m ais_tanker_pipeline.draught.draught_state_builder `
   --start-month 2025-09 --end-month 2025-09 [--dry-run] [--force]
 ```
 
-`--dry-run` 只解析配置和显示目标，不打开 Parquet。相同输入、范围、配置和输出 SHA256 幂等跳过；不一致输出失败关闭。`--force` 仅用于人工核查后的冲突重建。发布采用 temporary → target 与 manifest 原子写入；启动时仅可依据旧 manifest SHA256 恢复已验证 backup，其他残留失败关闭。
+`--dry-run` 只解析配置和显示目标，不打开 Parquet。相同输入、范围、配置和输出 SHA256 幂等跳过；不一致输出失败关闭。`--force` 仅用于人工核查后的冲突重建。发布采用 temporary → target 与 manifest 原子写入：强制重建会把旧 manifest 有、而新 manifest 不再拥有的分区一并备份后删除；启动时若 target 已匹配当前 manifest，则清理遗留旧 backup，否则仅可依据当前 manifest SHA256 恢复已验证 backup，其他残留失败关闭。
 
 ## 7. TDD 与真实月验收
 
-先写失败测试，至少覆盖：IMO 优先、唯一/歧义 MMSI、零值和越界吃水、同 IMO 同刻中位数归并及 manifest 审计、容差切段、48 h 间隙、6 h/3观测门槛、确定 ID、状态不重叠、schema gate、幂等和 backup 恢复。
+先写失败测试，至少覆盖：IMO 优先、唯一/歧义 MMSI、零值和越界吃水、同 IMO 同刻中位数归并及 manifest 审计、容差切段、48 h 间隙、6 h/3观测门槛、确定 ID、状态不重叠、schema gate、幂等、backup 恢复、发布完成后遗留旧 backup 清理，以及强制重建淘汰旧分区。
 
 2025-09 验收要求：
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import redirect_stdout
+from datetime import datetime, timezone
 import io
 import json
 import os
@@ -371,6 +372,65 @@ class DraughtArtifactTests(unittest.TestCase):
 
             self.assertEqual(recovered["action"], "skipped")
             self.assertFalse(backup.exists())
+
+    def test_discards_previously_published_backup_after_new_manifest_is_durable(self) -> None:
+        """Fails if a completed replacement later mistakes its old backup for recoverable current output."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reference = root / "reference.parquet"
+            static = root / "static" / "year=2025" / "month=09" / "date=2025-09-01" / "static.parquet"
+            static.parent.mkdir(parents=True)
+            write_parquet(reference, [("imo:9424209", "9424209", 111)], ["crude_vessel_id", "imo", "mmsi"])
+            initial_rows = [(111, 0, "9424209", 12.0, 0), (111, 3 * 3600, "9424209", 12.1, 0), (111, 6 * 3600, "9424209", 12.2, 0)]
+            write_parquet(static, initial_rows, ["mmsi", "receive_time_s", "imo", "draught_m", "dq_mask"])
+            config = DraughtConfig(
+                root / "config.yaml", reference, root / "static", root / "derived", (1.0, 30.0), 0.30, 48.0, 6.0, 3,
+                {"test": "config"},
+            )
+            first = run_draught_state_builder(config, "2025-09", "2025-09")
+            output = Path(first["output_paths"][0])
+            old_output = output.read_bytes()
+            write_parquet(static, [*initial_rows, (111, 9 * 3600, "9424209", 12.1, 0)], ["mmsi", "receive_time_s", "imo", "draught_m", "dq_mask"])
+            run_draught_state_builder(config, "2025-09", "2025-09", force=True)
+            backup = output.with_name(f"{output.stem}.backup{output.suffix}")
+            backup.write_bytes(old_output)
+
+            recovered = run_draught_state_builder(config, "2025-09", "2025-09")
+
+            self.assertEqual(recovered["action"], "skipped")
+            self.assertFalse(backup.exists())
+
+    def test_forced_rebuild_removes_retired_month_partition(self) -> None:
+        """Fails if force leaves a state partition that the replacement manifest no longer owns."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reference = root / "reference.parquet"
+            september = root / "static" / "year=2025" / "month=09" / "date=2025-09-01" / "static.parquet"
+            october = root / "static" / "year=2025" / "month=10" / "date=2025-10-01" / "static.parquet"
+            september.parent.mkdir(parents=True)
+            october.parent.mkdir(parents=True)
+            write_parquet(reference, [("imo:9424209", "9424209", 111)], ["crude_vessel_id", "imo", "mmsi"])
+            september_start = int(datetime(2025, 9, 1, tzinfo=timezone.utc).timestamp())
+            october_start = int(datetime(2025, 10, 1, tzinfo=timezone.utc).timestamp())
+            rows = lambda start: [(111, start, "9424209", 12.0, 0), (111, start + 3 * 3600, "9424209", 12.1, 0), (111, start + 6 * 3600, "9424209", 12.2, 0)]
+            write_parquet(september, rows(september_start), ["mmsi", "receive_time_s", "imo", "draught_m", "dq_mask"])
+            write_parquet(october, rows(october_start), ["mmsi", "receive_time_s", "imo", "draught_m", "dq_mask"])
+            config = DraughtConfig(
+                root / "config.yaml", reference, root / "static", root / "derived", (1.0, 30.0), 0.30, 48.0, 6.0, 3,
+                {"test": "config"},
+            )
+            first = run_draught_state_builder(config, "2025-09", "2025-10")
+            september_output = next(Path(path) for path in first["output_paths"] if "month=09" in path)
+            october_output = next(Path(path) for path in first["output_paths"] if "month=10" in path)
+            write_parquet(september, [(111, september_start, "9424209", 12.0, 0)], ["mmsi", "receive_time_s", "imo", "draught_m", "dq_mask"])
+
+            rebuilt = run_draught_state_builder(config, "2025-09", "2025-10", force=True)
+
+            self.assertEqual(rebuilt["action"], "built")
+            self.assertFalse(september_output.exists())
+            self.assertTrue(october_output.is_file())
+            manifest = json.loads(Path(rebuilt["manifest_path"]).read_text(encoding="utf-8"))
+            self.assertEqual([item["path"] for item in manifest["outputs"]], [str(october_output)])
 
     def test_records_same_imo_conflict_median_summary_in_manifest(self) -> None:
         """Fails if a wide simultaneous IMO spread is merged but cannot be audited from the manifest."""
