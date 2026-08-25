@@ -7,6 +7,8 @@ import io
 import json
 import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -1114,6 +1116,106 @@ class DensityCliTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertTrue(stderr.getvalue().startswith("ERROR:"))
 
+    def test_cli_normalizes_malformed_config_values_to_controlled_errors(self) -> None:
+        cases = {
+            "era5_files": None,
+            "search_radius_km": {"not": "a number"},
+        }
+        for field, value in cases.items():
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                config_path = write_density_config(
+                    root,
+                    [root / "not-opened-era.nc"],
+                    {
+                        f"{month:02d}": root / f"not-opened-woa-{month}.nc"
+                        for month in range(1, 13)
+                    },
+                )
+                raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+                raw[field] = value
+                config_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    code = main(["--config", str(config_path)])
+                self.assertEqual(code, 2)
+                self.assertEqual(stdout.getvalue(), "")
+                self.assertTrue(stderr.getvalue().startswith("ERROR:"))
+
+    def test_cli_normalizes_null_required_accepted_event_values(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            era, woa = write_complete_sources(root)
+            config_path = write_density_config(root, [era], woa)
+            connection = duckdb.connect()
+            try:
+                connection.execute(
+                    """
+                    COPY (
+                        SELECT 'accepted-null-time'::VARCHAR AS event_id,
+                               'accepted'::VARCHAR AS event_status,
+                               NULL::BIGINT AS event_start_s,
+                               1751328000::BIGINT AS event_end_s,
+                               0.0::DOUBLE AS event_longitude_deg,
+                               0.0::DOUBLE AS event_latitude_deg
+                    ) TO ? (FORMAT PARQUET)
+                    """,
+                    [str(root / "events.parquet")],
+                )
+            finally:
+                connection.close()
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                code = main(["--config", str(config_path)])
+            self.assertEqual(code, 2)
+            self.assertEqual(stdout.getvalue(), "")
+            self.assertTrue(stderr.getvalue().startswith("ERROR:"))
+
+    def test_cli_normalizes_corrupt_event_parquet_to_controlled_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            era, woa = write_complete_sources(root)
+            config_path = write_density_config(root, [era], woa)
+            (root / "events.parquet").write_bytes(b"not a parquet file")
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                code = main(["--config", str(config_path)])
+            self.assertEqual(code, 2)
+            self.assertEqual(stdout.getvalue(), "")
+            self.assertTrue(stderr.getvalue().startswith("ERROR:"))
+
+    def test_module_cli_returns_controlled_error_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config_path = write_density_config(
+                root,
+                [root / "not-opened-era.nc"],
+                {f"{month:02d}": root / f"not-opened-woa-{month}.nc" for month in range(1, 13)},
+            )
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            raw["era5_files"] = None
+            config_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "ais_tanker_pipeline.environment.event_density_matcher",
+                    "--config",
+                    str(config_path),
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 2)
+            self.assertEqual(completed.stdout, "")
+            self.assertTrue(completed.stderr.startswith("ERROR:"))
+            self.assertNotIn("Traceback", completed.stderr)
+
     def test_cli_prints_only_json_for_a_controlled_source_error(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1145,6 +1247,21 @@ class DensityCliTests(unittest.TestCase):
                 with self.assertRaises(KeyboardInterrupt):
                     main(["--config", str(config_path)])
 
+    def test_cli_does_not_reclassify_unexpected_runtime_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config_path = write_density_config(
+                root,
+                [root / "not-opened-era.nc"],
+                {f"{month:02d}": root / f"not-opened-woa-{month}.nc" for month in range(1, 13)},
+            )
+            with patch(
+                "ais_tanker_pipeline.environment.event_density_matcher.run_density_matcher",
+                side_effect=RuntimeError("unexpected implementation fault"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "unexpected implementation fault"):
+                    main(["--config", str(config_path)])
+
 
 class DensityDocumentationContractTests(unittest.TestCase):
     def test_handoff_documents_required_public_contract(self) -> None:
@@ -1152,6 +1269,10 @@ class DensityDocumentationContractTests(unittest.TestCase):
         modules = (root / "docs" / "MODULES.md").read_text(encoding="utf-8")
         readme = (root / "README.md").read_text(encoding="utf-8")
         for value in (
+            "已实现正式 CLI",
+            "本 PRD/模块文档为权威",
+            "固定密度等描述已被当前已批准设计取代",
+            "`event_detector_3h`、`voyage_builder`、`country_validation_builder` 仍未实现",
             "### `event_density_matcher`",
             "event_longitude_deg",
             "event_latitude_deg",
@@ -1163,6 +1284,9 @@ class DensityDocumentationContractTests(unittest.TestCase):
         ):
             self.assertIn(value, modules)
         for value in (
+            "事件海水密度模块",
+            "event_density_matcher",
+            "`event_detector_3h`、`voyage_builder`、`country_validation_builder` 仍未实现",
             "configs/environment/density.example.yaml",
             "AIS_DENSITY_CONFIG",
             "--dry-run",

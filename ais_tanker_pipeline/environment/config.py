@@ -67,11 +67,32 @@ def _resolve(config_path: Path, value: str) -> Path:
     return (candidate if candidate.is_absolute() else config_path.parent / candidate).resolve()
 
 
+def _path_value(config_path: Path, value: object, key: str) -> Path:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{key} must be a non-empty path string")
+    return _resolve(config_path, value)
+
+
+def _number(raw: dict[str, Any], key: str) -> float:
+    value = raw[key]
+    if isinstance(value, bool):
+        raise ValueError(f"{key} must be a number")
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{key} must be a number") from exc
+
+
 def _range(raw: dict[str, Any], key: str) -> tuple[float, float]:
     values = raw.get(key)
     if not isinstance(values, list) or len(values) != 2:
         raise ValueError(f"{key} must contain exactly two numbers")
-    lower, upper = (float(values[0]), float(values[1]))
+    if any(isinstance(value, bool) for value in values):
+        raise ValueError(f"{key} must contain exactly two numbers")
+    try:
+        lower, upper = (float(values[0]), float(values[1]))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{key} must contain exactly two numbers") from exc
     if not lower < upper:
         raise ValueError(f"{key} lower bound must be smaller than upper bound")
     return lower, upper
@@ -93,28 +114,33 @@ def load_density_config(path: str | Path) -> DensityConfig:
     missing = sorted(required.difference(raw))
     if missing:
         raise ValueError(f"density config missing fields: {', '.join(missing)}")
-    era5 = tuple(_resolve(config_path, str(value)) for value in raw["era5_files"])
+    era5_raw = raw["era5_files"]
+    if not isinstance(era5_raw, list):
+        raise ValueError("era5_files must be a list of path strings")
+    era5 = tuple(
+        _path_value(config_path, value, "era5_files entry") for value in era5_raw
+    )
     woa_raw = raw["woa23_monthly_files"]
     expected_woa_keys = {f"{month:02d}" for month in range(1, 13)}
     if not isinstance(woa_raw, dict) or set(woa_raw) != expected_woa_keys:
         raise ValueError("woa23_monthly_files keys must be strings 01 through 12")
     woa = {
-        int(key): _resolve(config_path, str(value))
+        int(key): _path_value(config_path, value, f"woa23_monthly_files[{key}]")
         for key, value in woa_raw.items()
     }
     if not era5:
         raise ValueError("era5_files must not be empty")
     if len(set(woa.values())) != len(woa):
         raise ValueError("woa23_monthly_files must not reuse a source file")
-    radius = float(raw["search_radius_km"])
-    fallback = float(raw["fallback_density_kg_m3"])
-    pressure = float(raw["sea_pressure_dbar"])
+    radius = _number(raw, "search_radius_km")
+    fallback = _number(raw, "fallback_density_kg_m3")
+    pressure = _number(raw, "sea_pressure_dbar")
     if radius != 75.0 or fallback != 1025.0 or pressure != 0.0:
         raise ValueError("version 1 requires radius=75, fallback=1025, pressure=0")
     return DensityConfig(
         path=config_path,
-        events_path=_resolve(config_path, str(raw["events_path"])),
-        output_root=_resolve(config_path, str(raw["output_root"])),
+        events_path=_path_value(config_path, raw["events_path"], "events_path"),
+        output_root=_path_value(config_path, raw["output_root"], "output_root"),
         era5_files=era5,
         woa23_monthly_files=woa,
         search_radius_km=radius,

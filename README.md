@@ -15,7 +15,10 @@
 STA .dat → 年度船舶/油轮登记
 POS .dat + 油轮登记 → 油轮位置
 油轮位置 → 三小时样本 → 可选 CSV/热力图
+外部已接受装卸事件 + ERA5/WOA23 → event_seawater_density sidecar（event_density_matcher CLI）
 ```
+
+`event_density_matcher` 已实现正式 CLI，但它只消费已存在的接受事件表；`event_detector_3h`、`voyage_builder`、`country_validation_builder` 仍未实现。其余下游模块也保持独立 PRD 后实施的边界。
 
 当前流程以 Python、DuckDB 和 Zstandard Parquet 为主。详细算法与限制见 [技术说明](docs/技术说明.md)。
 

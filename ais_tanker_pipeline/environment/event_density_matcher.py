@@ -37,6 +37,12 @@ from .sources import (
 
 
 ALGORITHM_VERSION = "1.0.0"
+
+
+class DensityOutputContractError(RuntimeError):
+    """A controlled failure of the public density sidecar contract."""
+
+
 REQUIRED_EVENT_COLUMNS = {
     "event_id", "event_status", "event_start_s", "event_end_s",
     "event_longitude_deg", "event_latitude_deg",
@@ -122,6 +128,8 @@ def read_accepted_events(config: DensityConfig) -> list[EventRecord]:
         raise ValueError("accepted event_id must be non-empty")
     if len(identifiers) != len(set(identifiers)):
         raise ValueError("accepted event_id must be unique")
+    if any(row[1] is None or row[2] is None for row in rows):
+        raise ValueError("accepted event_start_s and event_end_s must be non-null")
     events = [EventRecord(str(row[0]), int(row[1]), int(row[2]), row[3], row[4]) for row in rows]
     for event in events:
         event_month(event.start_s, event.end_s)
@@ -155,7 +163,7 @@ def validate_density_output(
         columns = [row[0] for row in described]
         types = [row[1] for row in described]
         if columns != OUTPUT_COLUMNS or types != OUTPUT_TYPES:
-            raise RuntimeError(
+            raise DensityOutputContractError(
                 f"density output contract failed: columns={columns}, types={types}"
             )
         row = connection.execute(
@@ -202,7 +210,7 @@ def validate_density_output(
         or summary["invalid_method"]
         or summary["teos10"] + summary["fixed_1025"] != summary["rows"]
     ):
-        raise RuntimeError(f"density output contract failed: {summary}")
+        raise DensityOutputContractError(f"density output contract failed: {summary}")
     return summary
 
 
@@ -501,7 +509,9 @@ def _recover_publication(
             target.unlink()
         os.replace(backup, target)
         if not _manifest_matches_file(manifest, target):
-            raise RuntimeError("recovered density backup failed publication verification")
+            raise DensityOutputContractError(
+                "recovered density backup failed publication verification"
+            )
         _cleanup_known_remnants(target, manifest_path)
         return
 
@@ -653,8 +663,9 @@ def main(argv: list[str] | None = None) -> int:
         FileNotFoundError,
         EnvironmentSourceError,
         OutputConflict,
-        RuntimeError,
+        DensityOutputContractError,
         OSError,
+        duckdb.Error,
     ) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
