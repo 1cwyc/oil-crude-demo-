@@ -1,8 +1,18 @@
 # 模块运行与交接索引
 
-本文件帮助另一台电脑上的 Codex 快速确定模块边界。`event_density_matcher` 已实现正式 CLI；对它而言，本 PRD/模块文档为权威，具体见当前已批准的 [事件海水密度匹配模块 PRD](superpowers/specs/2026-08-24-event-density-matcher-design.md) 与下方模块合同。 [数据字典与模块接口规格 v0.2](specs/AIS原油海运网络_数据字典与模块接口规格_v0.2.md) 是更广的总体设计；其中固定密度等描述已被当前已批准设计取代。
+本文件帮助另一台电脑上的 Codex 快速确定模块边界。`crude_fleet_loader` 与 `event_density_matcher` 已实现正式 CLI；对密度模块而言，本 PRD/模块文档为权威，具体见当前已批准的 [事件海水密度匹配模块 PRD](superpowers/specs/2026-08-24-event-density-matcher-design.md)。 [数据字典与模块接口规格 v0.2](specs/AIS原油海运网络_数据字典与模块接口规格_v0.2.md) 是更广的总体设计；其中固定密度等描述已被当前已批准设计取代，旧版身份、爬虫和 DWT 预测描述也不适用于当前方案 A。
 
-除 `event_density_matcher` 外，下列增量模块仍为规划中的工作，尚未实现正式入口；特别是 `event_detector_3h`、`voyage_builder`、`country_validation_builder` 仍未实现。实现任一未实现模块前必须检查真实仓库、浏览相关开源实现、编写独立 PRD 并取得用户确认。
+除 `crude_fleet_loader` 与 `event_density_matcher` 外，下列增量模块仍为规划中的工作，尚未实现正式入口；特别是 `crude_fleet_matcher`、`event_detector_3h`、`voyage_builder`、`country_validation_builder` 仍未实现。实现任一未实现模块前必须检查真实仓库、浏览相关开源实现、编写独立 PRD 并取得用户确认。
+
+### `crude_fleet_loader`
+
+- **Function:** 校验、规范化、去重外部原油船单，生成唯一权威 `reference/crude_vessels`；不读取 AIS 位置。
+- **Inputs:** 未版本化主机 YAML 中的 `fleet_csv` 与 `output_root`。CSV 必须含 `imo`、`MMSI`、`长`、`宽`、`dwt`；船名不进入正式输出。
+- **Outputs:** `reference/crude_vessels/crude_vessels.parquet`，严格仅 `crude_vessel_id`、`imo`、`mmsi`、`length_m`、`breadth_m`、`deadweight_t`；manifest 位于 `reports/manifests/crude_fleet_loader.json`。
+- **QC:** IMO 必须通过校验位；尺度与 DWT 为有限正数；相同 IMO 且属性一致时去重、属性冲突时失败。不同 IMO 共享 MMSI 保留为独立物理船舶，并在 manifest 记录 `ambiguous_mmsi`。
+- **Run:** `python -m ais_tanker_pipeline.fleet.crude_fleet_loader --config $env:AIS_CRUDE_FLEET_CONFIG [--dry-run] [--force]`。
+- **Idempotency:** 相同输入、配置和输出 SHA256 跳过；冲突失败关闭；`--force` 使用原子重建并在 manifest 发布失败时恢复旧表。
+- **Downstream:** `crude_fleet_matcher`；下游只以 `crude_vessel_id` 连接该权威表。
 
 ### `schema_gate`
 

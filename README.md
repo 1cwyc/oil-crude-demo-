@@ -16,9 +16,21 @@ STA .dat → 年度船舶/油轮登记
 POS .dat + 油轮登记 → 油轮位置
 油轮位置 → 三小时样本 → 可选 CSV/热力图
 外部已接受装卸事件 + ERA5/WOA23 → event_seawater_density sidecar（event_density_matcher CLI）
+外部原油船单 CSV → reference/crude_vessels（crude_fleet_loader CLI）
 ```
 
 `event_density_matcher` 已实现正式 CLI，但它只消费已存在的接受事件表；`event_detector_3h`、`voyage_builder`、`country_validation_builder` 仍未实现。其余下游模块也保持独立 PRD 后实施的边界。
+
+## 原油船单参考表
+
+`crude_fleet_loader` 将外部船单规范化为唯一 IMO 主键的 `reference/crude_vessels`；它不读取或复制 AIS 位置。使用 [配置模板](configs/fleet/crude_fleet.example.yaml) 在仓库外创建主机 YAML：
+
+```powershell
+& .\.venv\Scripts\python.exe -m ais_tanker_pipeline.fleet.crude_fleet_loader --config $env:AIS_CRUDE_FLEET_CONFIG --dry-run
+& .\.venv\Scripts\python.exe -m ais_tanker_pipeline.fleet.crude_fleet_loader --config $env:AIS_CRUDE_FLEET_CONFIG
+```
+
+相同输入会幂等跳过；输入、配置或输出不一致时失败关闭。仅在人工检查既有派生产物后可使用 `--force` 原子重建。
 
 当前流程以 Python、DuckDB 和 Zstandard Parquet 为主。详细算法与限制见 [技术说明](docs/技术说明.md)。
 

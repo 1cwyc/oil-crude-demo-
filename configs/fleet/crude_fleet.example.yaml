@@ -1,0 +1,2 @@
+fleet_csv: "${AIS_FLEET_CSV}"
+output_root: "${AIS_DERIVED_ROOT}"
