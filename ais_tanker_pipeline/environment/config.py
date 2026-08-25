@@ -22,7 +22,11 @@ def _construct_unique_mapping(
     mapping: dict[Any, Any] = {}
     for key_node, value_node in node.value:
         key = loader.construct_object(key_node, deep=deep)
-        if key in mapping:
+        try:
+            duplicate = key in mapping
+        except TypeError as exc:
+            raise ValueError("density config mapping keys must be hashable") from exc
+        if duplicate:
             raise yaml.constructor.ConstructorError(
                 "while constructing a mapping",
                 node.start_mark,
@@ -79,7 +83,7 @@ def _number(raw: dict[str, Any], key: str) -> float:
         raise ValueError(f"{key} must be a number")
     try:
         return float(value)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError(f"{key} must be a number") from exc
 
 
@@ -91,7 +95,7 @@ def _range(raw: dict[str, Any], key: str) -> tuple[float, float]:
         raise ValueError(f"{key} must contain exactly two numbers")
     try:
         lower, upper = (float(values[0]), float(values[1]))
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError(f"{key} must contain exactly two numbers") from exc
     if not lower < upper:
         raise ValueError(f"{key} lower bound must be smaller than upper bound")

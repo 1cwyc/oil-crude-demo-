@@ -1216,6 +1216,58 @@ class DensityCliTests(unittest.TestCase):
             self.assertTrue(completed.stderr.startswith("ERROR:"))
             self.assertNotIn("Traceback", completed.stderr)
 
+    def test_cli_normalizes_unhashable_yaml_mapping_key(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            config_path = Path(temporary) / "density.yaml"
+            config_path.write_text(
+                "? [unhashable, mapping-key]\n: unexpected\n",
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                code = main(["--config", str(config_path)])
+            self.assertEqual(code, 2)
+            self.assertEqual(stdout.getvalue(), "")
+            self.assertTrue(stderr.getvalue().startswith("ERROR:"))
+
+    def test_module_cli_normalizes_overflowing_numeric_config_values(self) -> None:
+        cases = {
+            "search_radius_km": 10 ** 400,
+            "salinity_valid_range": [0, 10 ** 400],
+        }
+        for field, value in cases.items():
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                config_path = write_density_config(
+                    root,
+                    [root / "not-opened-era.nc"],
+                    {
+                        f"{month:02d}": root / f"not-opened-woa-{month}.nc"
+                        for month in range(1, 13)
+                    },
+                )
+                raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+                raw[field] = value
+                config_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "ais_tanker_pipeline.environment.event_density_matcher",
+                        "--config",
+                        str(config_path),
+                    ],
+                    cwd=Path(__file__).resolve().parents[1],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(completed.returncode, 2)
+                self.assertEqual(completed.stdout, "")
+                self.assertTrue(completed.stderr.startswith("ERROR:"))
+                self.assertNotIn("Traceback", completed.stderr)
+
     def test_cli_prints_only_json_for_a_controlled_source_error(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1268,6 +1320,10 @@ class DensityDocumentationContractTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         modules = (root / "docs" / "MODULES.md").read_text(encoding="utf-8")
         readme = (root / "README.md").read_text(encoding="utf-8")
+        prd = (
+            root / "docs" / "superpowers" / "specs"
+            / "2026-08-24-event-density-matcher-design.md"
+        ).read_text(encoding="utf-8")
         for value in (
             "已实现正式 CLI",
             "本 PRD/模块文档为权威",
@@ -1293,6 +1349,12 @@ class DensityDocumentationContractTests(unittest.TestCase):
             "--force",
         ):
             self.assertIn(value, readme)
+        for value in (
+            "状态：设计已实施、CLI已交付",
+            "真实数据验收仍待 accepted events 输入",
+            "下游 voyage/network 不属于本模块，未在此分支实现",
+        ):
+            self.assertIn(value, prd)
 
 
 if __name__ == "__main__":
