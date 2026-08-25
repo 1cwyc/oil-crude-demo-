@@ -46,6 +46,20 @@ Windows PowerShell：
 
 自测只读取 `sample_data/` 中的合成记录，并把结果写入临时目录。
 
+## 事件海水密度模块
+
+最短入口（Windows PowerShell）：
+
+```powershell
+$env:AIS_DENSITY_CONFIG = 'D:\data\host-configs\density.yaml'
+& .\.venv\Scripts\python.exe -m ais_tanker_pipeline.environment.event_density_matcher --config $env:AIS_DENSITY_CONFIG --dry-run
+& .\.venv\Scripts\python.exe -m ais_tanker_pipeline.environment.event_density_matcher --config $env:AIS_DENSITY_CONFIG
+```
+
+以 [density.example.yaml](configs/environment/density.example.yaml) 作为主机配置模板。真实事件、ERA5、WOA23 和输出路径只存在于未版本化主机 YAML；模板的 `${AIS_ENV_ROOT}` 是主机环境变量，不得将真实路径或数据提交到仓库。
+
+`--dry-run` 不打开事件或环境源文件。正常首次运行会执行 ERA5/WOA23 的 source schema gate，成功后生成严格三列的 `event_seawater_density.parquet` 与 manifest。相同输入会幂等跳过；只有人工检查冲突的派生输出后才能使用 `--force` 重建。
+
 ## 使用真实 AIS 数据
 
 将真实 POS/STA 和所有输出放在仓库外，通过复制配置模板并修改 `input_patterns`、`output_root` 和 `duckdb.temp_directory` 指向本机数据盘。运行前先执行只读的 `doctor` 和 `plan`；不要把真实路径写回版本化配置。

@@ -101,12 +101,40 @@
 - **Prerequisites:** 三小时吃水关联视图和港区映射可用。
 - **Inputs:** `samples_3h`、`samples_3h_draught_link`、`port_zones`、`zone_node_map`。
 - **Fields read:** `internal_vessel_id`、`target_time_s`、`pos_time_s`、经纬度、`sog_kn`、`navigation_status`、位置质量字段、`draft_state_id`、匹配吃水、zone/node。
-- **Outputs:** `events/port_calls`、`events/loading_unloading_events`。
+- **Outputs:** `events/port_calls`、`events/loading_unloading_events`。接受事件输出还必须包含 `event_longitude_deg`（DOUBLE）和 `event_latitude_deg`（DOUBLE）。唯一权威规则：在事件时间窗内，对有效低速三小时样本的经纬度取中位位置；再保存与该中位位置球面距离最小的真实有效样本坐标。`event_density_matcher` 只消费这两个字段，绝不重新扫描轨迹样本。
 - **Configuration:** `configs/events/event_rules_3h.yaml`。
 - **Run entry:** Not implemented; the module requires its own approved PRD before an entry point is added.
 - **Blocking conditions:** 状态方向矛盾、重复事件、空间映射冲突或必要速度证据缺失。
 - **Acceptance:** 使用前后稳定状态而非单点差；规则编号和 QC 可复核；候选与正式接受状态分开。
 - **Downstream consumers:** 全分辨率审计、航次和国家验证。
+
+### `event_density_matcher`
+
+- **唯一职责：** 为每一个接受的装载或卸载事件独立匹配月度 WOA23 表层盐度和 ERA5 SST，并输出最终海水密度；不识别事件、不计算代表坐标、不配对航次，也不实施 `voyage_builder` 或国家验证。
+- **事件输入：** `events/loading_unloading_events`；仅读取 `event_id` (VARCHAR, 非空唯一)、`event_status` (VARCHAR, 仅 `accepted`)、`event_start_s` (BIGINT, UTC epoch 秒)、`event_end_s` (BIGINT, 严格大于开始时刻)、`event_longitude_deg` (DOUBLE，可空) 和 `event_latitude_deg` (DOUBLE，可空)。代表坐标必须由上游 `event_detector_3h` 提供。
+- **环境输入：** ERA5 `sst` (K)，坐标 `valid_time`、`latitude`、`longitude`，覆盖连续且唯一的 2025-07 至 2026-06；WOA23 `s_an` (单位 `1`，标准名 `sea_water_practical_salinity`)，坐标 `lat`、`lon`、`depth`，自然月 01 至 12 各一个文件。正式运行先执行 source schema gate；源合同错误是阻断错误，不会逐事件回退。
+- **配置：** 从未版本化主机 YAML 读取 `events_path`、`output_root`、`era5_files`、`woa23_monthly_files`、`search_radius_km`、`fallback_density_kg_m3`、`sea_pressure_dbar`、`salinity_valid_range`、`sst_valid_range_c`、`density_valid_range_kg_m3`。版本化模板为 `configs/environment/density.example.yaml`；模板中的 `${AIS_ENV_ROOT}` 必须在主机环境中设置。PowerShell 的 `$env:AIS_DENSITY_CONFIG` 仅保存该 YAML 路径。
+- **匹配与回退：** 盐度和 SST 在各自网格中独立选择 75 km 内的最近有效格点；两者成功时用 TEOS-10 计算密度。位置无效、任一变量无有效格点或计算异常时仍保留事件，写入 `1025` 和 `fixed_1025`。
+- **输出与 manifest：** 只写 `environment/event_seawater_density/event_seawater_density.parquet`，且严格仅三列：`event_id` (VARCHAR)、`seawater_density_kg_m3` (DOUBLE)、`density_method` (VARCHAR: `teos10` 或 `fixed_1025`)。伴随 manifest 位于 `reports/manifests/event_density_matcher.json`，记录输入指纹/哈希、源文件哈希、配置哈希、GSW 版本、输出行数、两种方法计数和生成时间。
+- **运行与退出码：**
+
+  ```powershell
+  $env:AIS_DENSITY_CONFIG = 'D:\data\host-configs\density.yaml'
+  & .\.venv\Scripts\python.exe -m ais_tanker_pipeline.environment.event_density_matcher --config $env:AIS_DENSITY_CONFIG --dry-run
+  & .\.venv\Scripts\python.exe -m ais_tanker_pipeline.environment.event_density_matcher --config $env:AIS_DENSITY_CONFIG
+  ```
+
+  `--dry-run` 只解析配置和显示目标，绝不打开事件或 NetCDF 源。成功构建、幂等跳过和 dry-run 均退出 `0` 并在 stdout 输出可解析 JSON；配置、输入、source gate、输出冲突或输出合同错误退出 `2` 且 stderr 以 `ERROR:` 开头。相同输入和配置会幂等跳过；仅在人工检查冲突的派生输出后才可加 `--force` 原子重建。
+- **下游双连接：** `voyage_builder` 必须按 `load_event_id`、`unload_event_id` 对同一表连接两次：
+
+  ```sql
+  SELECT v.voyage_id,
+         load_rho.seawater_density_kg_m3 AS rho_load,
+         unload_rho.seawater_density_kg_m3 AS rho_unload
+  FROM voyage_pairs AS v
+  JOIN event_seawater_density AS load_rho ON load_rho.event_id = v.load_event_id
+  JOIN event_seawater_density AS unload_rho ON unload_rho.event_id = v.unload_event_id;
+  ```
 
 ### `fullres_event_audit`
 
@@ -124,8 +152,8 @@
 ### `voyage_builder`
 
 - **Function:** 配对接受的装卸事件，计算航迹距离和 SCPC 原油货量，生成正式候选航次。
-- **Prerequisites:** 接受事件、船长船宽、DWT 等级/Cb、密度和三小时轨迹可用。
-- **Inputs:** 事件表、船舶参数、DWT 预测、密度配置、三小时输入视图。
+- **Prerequisites:** 接受事件、船长船宽、DWT 等级/Cb、`event_seawater_density` 和三小时轨迹可用。
+- **Inputs:** 事件表、`event_seawater_density`、船舶参数、DWT 预测和三小时输入视图。
 - **Fields read:** 船舶/事件 ID、事件时间和节点、前后状态 ID、状态吃水、长宽、`dwt_class_id`、密度、三小时经纬度。
 - **Outputs:** `voyages/crude_voyages`。
 - **Configuration:** DWT/Cb、密度、航次时长/距离/覆盖和原油依据规则。

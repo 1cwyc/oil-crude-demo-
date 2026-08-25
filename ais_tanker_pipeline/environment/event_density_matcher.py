@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import argparse
 from datetime import datetime, timezone
 import json
 import math
 import os
 from pathlib import Path
+import sys
 import time
 from typing import Any
 import uuid
@@ -23,9 +25,15 @@ from ais_tanker_pipeline.artifacts import (
     sha256_file,
 )
 
-from .config import DensityConfig
+from .config import DensityConfig, load_density_config
 from .density import DensityResult, EventRecord, event_month, match_event_density
-from .sources import STUDY_MONTHS, SourceCatalog, build_source_catalog, load_environment_month
+from .sources import (
+    STUDY_MONTHS,
+    EnvironmentSourceError,
+    SourceCatalog,
+    build_source_catalog,
+    load_environment_month,
+)
 
 
 ALGORITHM_VERSION = "1.0.0"
@@ -611,3 +619,46 @@ def run_density_matcher(
         "counts": counts,
         "summary": summary,
     }
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the narrow public command parser for this derived sidecar."""
+    parser = argparse.ArgumentParser(
+        description="Match accepted loading/unloading events to monthly seawater density."
+    )
+    parser.add_argument("--config", required=True, help="Untracked host YAML configuration.")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Atomically rebuild a conflicting derived output.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show target only; do not open events or NetCDF files.",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run the matcher and map expected operational failures to exit code 2."""
+    args = build_parser().parse_args(argv)
+    try:
+        config = load_density_config(args.config)
+        report = run_density_matcher(config, force=args.force, dry_run=args.dry_run)
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0
+    except (
+        ValueError,
+        FileNotFoundError,
+        EnvironmentSourceError,
+        OutputConflict,
+        RuntimeError,
+        OSError,
+    ) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import copy
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
+import io
 import json
 import os
 from pathlib import Path
@@ -16,6 +18,7 @@ import xarray as xr
 import yaml
 
 from ais_tanker_pipeline.environment.config import load_density_config
+from ais_tanker_pipeline.environment.event_density_matcher import main
 from ais_tanker_pipeline.environment.density import (
     DensityResult,
     EventRecord,
@@ -1083,6 +1086,89 @@ class DensityBatchCrashRecoveryTests(unittest.TestCase):
             self.assertEqual(target.read_bytes(), target_before)
             self.assertEqual(manifest_path.read_bytes(), manifest_before)
             self.assertEqual(list(target.parent.glob("*.partial-*.parquet")), [])
+
+
+class DensityCliTests(unittest.TestCase):
+    def test_cli_dry_run_returns_json_without_opening_sources(self) -> None:
+        """Dry run parses host config but must not touch event or NetCDF sources."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config_path = write_density_config(
+                root,
+                [root / "not-opened-era.nc"],
+                {
+                    f"{month:02d}": root / f"not-opened-woa-{month}.nc"
+                    for month in range(1, 13)
+                },
+            )
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = main(["--config", str(config_path), "--dry-run"])
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(stdout.getvalue())["action"], "would_build")
+
+    def test_cli_returns_two_for_missing_config(self) -> None:
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            code = main(["--config", "missing-density-config.yaml"])
+        self.assertEqual(code, 2)
+        self.assertTrue(stderr.getvalue().startswith("ERROR:"))
+
+    def test_cli_prints_only_json_for_a_controlled_source_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config_path = write_density_config(
+                root,
+                [root / "missing-era.nc"],
+                {f"{month:02d}": root / f"missing-woa-{month}.nc" for month in range(1, 13)},
+            )
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                code = main(["--config", str(config_path)])
+            self.assertEqual(code, 2)
+            self.assertEqual(stdout.getvalue(), "")
+            self.assertTrue(stderr.getvalue().startswith("ERROR:"))
+
+    def test_cli_does_not_swallow_keyboard_interrupt(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config_path = write_density_config(
+                root,
+                [root / "not-opened-era.nc"],
+                {f"{month:02d}": root / f"not-opened-woa-{month}.nc" for month in range(1, 13)},
+            )
+            with patch(
+                "ais_tanker_pipeline.environment.event_density_matcher.run_density_matcher",
+                side_effect=KeyboardInterrupt,
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    main(["--config", str(config_path)])
+
+
+class DensityDocumentationContractTests(unittest.TestCase):
+    def test_handoff_documents_required_public_contract(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        modules = (root / "docs" / "MODULES.md").read_text(encoding="utf-8")
+        readme = (root / "README.md").read_text(encoding="utf-8")
+        for value in (
+            "### `event_density_matcher`",
+            "event_longitude_deg",
+            "event_latitude_deg",
+            "75 km",
+            "fixed_1025",
+            "event_seawater_density.parquet",
+            "load_rho.event_id = v.load_event_id",
+            "unload_rho.event_id = v.unload_event_id",
+        ):
+            self.assertIn(value, modules)
+        for value in (
+            "configs/environment/density.example.yaml",
+            "AIS_DENSITY_CONFIG",
+            "--dry-run",
+            "--force",
+        ):
+            self.assertIn(value, readme)
 
 
 if __name__ == "__main__":
