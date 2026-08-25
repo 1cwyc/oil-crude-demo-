@@ -4,13 +4,24 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import datetime, timezone
+import os
 from pathlib import Path
 from statistics import median
 
 import duckdb
+import pandas
 
-from ais_tanker_pipeline.artifacts import canonical_hash
-from ais_tanker_pipeline.draught.config import DraughtConfig
+from ais_tanker_pipeline.artifacts import (
+    OutputConflict,
+    canonical_hash,
+    file_signature,
+    partial_path,
+    read_manifest,
+    sha256_file,
+    write_json_atomic,
+)
+from ais_tanker_pipeline.draught.config import DraughtConfig, month_range
 
 
 @dataclass(frozen=True)
@@ -127,3 +138,91 @@ def build_draught_states(observations: Iterable[DraughtObservation], config: Dra
     if state is not None:
         states.append(state)
     return states
+
+
+def _static_files(static_root: Path, months: tuple[str, ...]) -> tuple[Path, ...]:
+    paths: list[Path] = []
+    for month in months:
+        year, number = month.split("-", maxsplit=1)
+        partition = static_root / f"year={year}" / f"month={number}"
+        paths.extend(partition.rglob("*.parquet"))
+    resolved = tuple(sorted((path.resolve() for path in paths), key=str))
+    if not resolved:
+        raise ValueError("requested static AIS month has no Parquet files")
+    return resolved
+
+
+def _target_for_state(output_root: Path, state: DraughtState) -> Path:
+    timestamp = datetime.fromtimestamp(state.state_start_s, tz=timezone.utc)
+    return (
+        output_root / "draught" / "draught_states" / f"year={timestamp:%Y}" /
+        f"month={timestamp:%m}" / "draught_states.parquet"
+    )
+
+
+def _write_states(states: list[DraughtState], target: Path) -> None:
+    temporary = partial_path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    frame = pandas.DataFrame(
+        [(item.draught_state_id, item.crude_vessel_id, item.state_start_s, item.state_end_s, item.draught_median_m) for item in states],
+        columns=["draught_state_id", "crude_vessel_id", "state_start_s", "state_end_s", "draught_median_m"],
+    )
+    connection = duckdb.connect()
+    try:
+        connection.register("states", frame)
+        connection.execute(
+            "COPY (SELECT draught_state_id::VARCHAR AS draught_state_id, crude_vessel_id::VARCHAR AS crude_vessel_id, "
+            "state_start_s::BIGINT AS state_start_s, state_end_s::BIGINT AS state_end_s, "
+            "draught_median_m::DOUBLE AS draught_median_m FROM states ORDER BY crude_vessel_id, state_start_s) "
+            "TO ? (FORMAT PARQUET, COMPRESSION ZSTD)",
+            [str(temporary)],
+        )
+    finally:
+        connection.close()
+    os.replace(temporary, target)
+
+
+def run_draught_state_builder(
+    config: DraughtConfig, start_month: str, end_month: str, *, force: bool = False
+) -> dict[str, object]:
+    """Publish deterministic stable-draught states for an inclusive UTC month range."""
+    months = month_range(start_month, end_month)
+    static_paths = _static_files(config.static_root, months)
+    inputs = [
+        {**file_signature(path), "sha256": sha256_file(path)}
+        for path in (config.reference_path, *static_paths)
+    ]
+    observations = read_matched_observations(
+        config.reference_path, static_paths, valid_range=config.draught_valid_range_m, tolerance_m=config.state_tolerance_m
+    )
+    states = build_draught_states(observations, config)
+    grouped: dict[Path, list[DraughtState]] = {}
+    for state in states:
+        grouped.setdefault(_target_for_state(config.output_root, state), []).append(state)
+    if not grouped:
+        raise ValueError("no stable draught states for requested month range")
+    targets = tuple(sorted(grouped, key=str))
+    manifest_path = config.output_root / "reports" / "manifests" / f"draught_state_builder_{start_month}_{end_month}.json"
+    existing = read_manifest(manifest_path)
+    if (
+        isinstance(existing, dict)
+        and existing.get("status") == "complete"
+        and existing.get("module_name") == "draught_state_builder"
+        and existing.get("config_hash") == config.config_hash
+        and existing.get("inputs") == inputs
+        and [item["path"] for item in existing.get("outputs", [])] == [str(path) for path in targets]
+        and all(item.get("sha256") == sha256_file(Path(item["path"])) for item in existing.get("outputs", []))
+    ):
+        return {"action": "skipped", "output_paths": [str(path) for path in targets], "manifest_path": str(manifest_path), "counts": existing["counts"]}
+    if (manifest_path.exists() or any(path.exists() for path in targets)) and not force:
+        raise OutputConflict("draught state output already exists; inspect it before rebuilding")
+    for target, target_states in grouped.items():
+        _write_states(target_states, target)
+    outputs = [{**file_signature(path), "sha256": sha256_file(path)} for path in targets]
+    manifest = {
+        "status": "complete", "module_name": "draught_state_builder", "config_hash": config.config_hash,
+        "months": list(months), "inputs": inputs, "outputs": outputs,
+        "counts": {"states": len(states), "observations": len(observations)},
+    }
+    write_json_atomic(manifest_path, manifest)
+    return {"action": "built", "output_paths": [str(path) for path in targets], "manifest_path": str(manifest_path), "counts": manifest["counts"]}

@@ -9,7 +9,12 @@ import pandas as pd
 import yaml
 
 from ais_tanker_pipeline.draught.config import DraughtConfig, load_draught_config, month_range
-from ais_tanker_pipeline.draught.draught_state_builder import DraughtObservation, build_draught_states, read_matched_observations
+from ais_tanker_pipeline.draught.draught_state_builder import (
+    DraughtObservation,
+    build_draught_states,
+    read_matched_observations,
+    run_draught_state_builder,
+)
 
 
 def write_parquet(path: Path, rows: list[tuple[object, ...]], columns: list[str]) -> None:
@@ -159,6 +164,39 @@ class DraughtReducerTests(unittest.TestCase):
         )
 
         self.assertEqual([(item.state_start_s, item.state_end_s) for item in states], [(0, 6 * 3600)])
+
+
+class DraughtArtifactTests(unittest.TestCase):
+    def test_publishes_month_state_sidecar_and_skips_identical_inputs(self) -> None:
+        """Fails if stable states are not published as a minimal idempotent monthly artifact."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reference = root / "reference.parquet"
+            static = root / "static" / "year=2025" / "month=09" / "date=2025-09-01" / "static.parquet"
+            static.parent.mkdir(parents=True)
+            write_parquet(reference, [("imo:9424209", "9424209", 111)], ["crude_vessel_id", "imo", "mmsi"])
+            write_parquet(
+                static,
+                [(111, 0, "9424209", 12.0, 0), (111, 3 * 3600, "9424209", 12.1, 0), (111, 6 * 3600, "9424209", 12.2, 0)],
+                ["mmsi", "receive_time_s", "imo", "draught_m", "dq_mask"],
+            )
+            config = DraughtConfig(
+                root / "config.yaml", reference, root / "static", root / "derived", (1.0, 30.0), 0.30, 48.0, 6.0, 3,
+                {"test": "config"},
+            )
+
+            first = run_draught_state_builder(config, "2025-09", "2025-09")
+            second = run_draught_state_builder(config, "2025-09", "2025-09")
+            output = Path(first["output_paths"][0])
+            connection = duckdb.connect()
+            try:
+                schema = connection.execute("DESCRIBE SELECT * FROM read_parquet(?, hive_partitioning=false)", [str(output)]).fetchall()
+            finally:
+                connection.close()
+
+        self.assertEqual(first["action"], "built")
+        self.assertEqual(second["action"], "skipped")
+        self.assertEqual([row[0] for row in schema], ["draught_state_id", "crude_vessel_id", "state_start_s", "state_end_s", "draught_median_m"])
 
 
 if __name__ == "__main__":
