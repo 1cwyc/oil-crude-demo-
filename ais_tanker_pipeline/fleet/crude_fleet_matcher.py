@@ -78,6 +78,36 @@ def match_crude_fleet_samples(
                 },
                 "three-hour AIS samples",
             )
+        invalid_reference = connection.execute(
+            """
+            SELECT count(*)
+            FROM read_parquet(?)
+            WHERE crude_vessel_id IS NULL OR trim(crude_vessel_id) = ''
+               OR imo IS NULL OR trim(imo) = ''
+               OR mmsi IS NULL
+            """,
+            [str(reference)],
+        ).fetchone()[0]
+        if invalid_reference:
+            raise ValueError("crude fleet reference contains null or empty identity values")
+        duplicate_imo = connection.execute(
+            "SELECT count(*) FROM (SELECT imo FROM read_parquet(?) GROUP BY imo HAVING count(*) > 1)",
+            [str(reference)],
+        ).fetchone()[0]
+        if duplicate_imo:
+            raise ValueError("crude fleet reference contains duplicate IMO")
+        duplicate_vessel_id = connection.execute(
+            "SELECT count(*) FROM (SELECT crude_vessel_id FROM read_parquet(?) GROUP BY crude_vessel_id HAVING count(*) > 1)",
+            [str(reference)],
+        ).fetchone()[0]
+        if duplicate_vessel_id:
+            raise ValueError("crude fleet reference contains duplicate crude_vessel_id")
+        null_sample_keys = connection.execute(
+            "SELECT count(*) FROM read_parquet(?) WHERE mmsi IS NULL OR target_time_s IS NULL",
+            [[str(path) for path in samples]],
+        ).fetchone()[0]
+        if null_sample_keys:
+            raise ValueError("null three-hour AIS keys")
         duplicate_keys = connection.execute(
             """
             SELECT count(*)
@@ -124,11 +154,20 @@ def match_crude_fleet_samples(
             """
             SELECT count(*) AS matched_rows,
                    count(*) FILTER (WHERE match_method = 'imo') AS imo_matches,
-                   count(*) FILTER (WHERE match_method = 'mmsi') AS mmsi_matches
+                   count(*) FILTER (WHERE match_method = 'mmsi') AS mmsi_matches,
+                   count(*) FILTER (WHERE mmsi IS NULL OR target_time_s IS NULL
+                       OR crude_vessel_id IS NULL OR trim(crude_vessel_id) = ''
+                       OR match_method NOT IN ('imo', 'mmsi')) AS invalid_rows,
+                   count(*) - count(DISTINCT (mmsi, target_time_s)) AS duplicate_keys
             FROM read_parquet(?)
             """,
             [str(temporary)],
         ).fetchone()
+        if counts_row[3] or counts_row[4]:
+            raise ValueError("invalid crude fleet match sidecar contract")
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
     finally:
         connection.close()
     os.replace(temporary, target)
@@ -145,6 +184,34 @@ def _month_parts(month: str) -> tuple[str, str]:
 
 def _input_signature(path: Path) -> dict[str, object]:
     return {**file_signature(path), "sha256": sha256_file(path)}
+
+
+def _manifest_matches_output(manifest: object, output: Path) -> bool:
+    if not isinstance(manifest, dict) or manifest.get("status") != "complete" or not output.exists():
+        return False
+    expected_hash = manifest.get("output", {}).get("sha256") if isinstance(manifest.get("output"), dict) else None
+    if not isinstance(expected_hash, str):
+        return False
+    try:
+        return sha256_file(output) == expected_hash
+    except OSError:
+        return False
+
+
+def _recover_match_publication(target: Path, manifest_path: Path) -> None:
+    """Restore the last manifest-verified output after an interrupted replacement."""
+    backup = target.with_name(f"{target.stem}.backup{target.suffix}")
+    if not backup.exists():
+        return
+    manifest = read_manifest(manifest_path)
+    if not _manifest_matches_output(manifest, backup):
+        raise OutputConflict("unverified crude fleet match backup requires manual inspection")
+    if _manifest_matches_output(manifest, target):
+        backup.unlink()
+        return
+    os.replace(backup, target)
+    if not _manifest_matches_output(manifest, target):
+        raise OutputConflict("recovered crude fleet match backup failed verification")
 
 
 def build_crude_fleet_matches(
@@ -166,6 +233,7 @@ def build_crude_fleet_matches(
     target = root / "enrichment" / "crude_fleet_matches" / f"year={year}" / f"month={month_number}" / "crude_fleet_matches.parquet"
     manifest_path = root / "reports" / "manifests" / f"crude_fleet_matcher_{month}.json"
     inputs = [_input_signature(reference), *(_input_signature(path) for path in samples)]
+    _recover_match_publication(target, manifest_path)
     existing = read_manifest(manifest_path)
     if (
         isinstance(existing, dict)

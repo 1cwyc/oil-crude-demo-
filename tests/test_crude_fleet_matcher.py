@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import redirect_stdout
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -159,6 +160,34 @@ class CrudeFleetMatcherTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "mmsi must be INTEGER or BIGINT"):
                 match_crude_fleet_samples(reference, samples, root / "matches.parquet")
 
+    def test_rejects_a_reference_with_duplicate_imos(self) -> None:
+        """Fails if a malformed reference can multiply one three-hour AIS key in the sidecar."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reference = root / "reference.parquet"
+            samples = root / "samples.parquet"
+            write_parquet(
+                reference,
+                [("imo:9424209", "9424209", 111), ("imo:9424209b", "9424209", 222)],
+                ["crude_vessel_id", "imo", "mmsi"],
+            )
+            write_parquet(samples, [(999, 1000, "9424209")], ["mmsi", "target_time_s", "registry_imo"])
+
+            with self.assertRaisesRegex(ValueError, "duplicate IMO"):
+                match_crude_fleet_samples(reference, samples, root / "matches.parquet")
+
+    def test_rejects_samples_with_null_primary_keys(self) -> None:
+        """Fails if an IMO match could publish a sidecar row without its AIS join key."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reference = root / "reference.parquet"
+            samples = root / "samples.parquet"
+            write_parquet(reference, [("imo:9424209", "9424209", 111)], ["crude_vessel_id", "imo", "mmsi"])
+            write_parquet(samples, [(None, 1000, "9424209")], ["mmsi", "target_time_s", "registry_imo"])
+
+            with self.assertRaisesRegex(ValueError, "null three-hour AIS keys"):
+                match_crude_fleet_samples(reference, samples, root / "matches.parquet")
+
     def test_publishes_month_sidecar_manifest_and_skips_identical_inputs(self) -> None:
         """Fails if a match sidecar lacks a deterministic monthly identity or provenance."""
         with tempfile.TemporaryDirectory() as temporary:
@@ -186,6 +215,31 @@ class CrudeFleetMatcherTests(unittest.TestCase):
         self.assertEqual(output.parts[-5:], ("enrichment", "crude_fleet_matches", "year=2025", "month=09", "crude_fleet_matches.parquet"))
         self.assertTrue(manifest_exists)
         self.assertEqual([column[0] for column in schema], ["mmsi", "target_time_s", "crude_vessel_id", "match_method"])
+
+    def test_recovers_verified_backup_before_idempotency_check(self) -> None:
+        """Fails if an interruption after target replacement strands the last verified publication."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reference = root / "reference.parquet"
+            samples = root / "samples.parquet"
+            write_parquet(reference, [("imo:9424209", "9424209", 111)], ["crude_vessel_id", "imo", "mmsi"])
+            write_parquet(samples, [(111, 1000, "9424209")], ["mmsi", "target_time_s", "registry_imo"])
+            first = build_crude_fleet_matches(reference, samples, root / "derived", "2025-09", config_hash="a" * 64)
+            target = Path(first["output_path"])
+            backup = target.with_name(f"{target.stem}.backup{target.suffix}")
+            os.replace(target, backup)
+            target.write_bytes(b"incomplete replacement")
+
+            recovered = build_crude_fleet_matches(reference, samples, root / "derived", "2025-09", config_hash="a" * 64)
+            connection = duckdb.connect()
+            try:
+                rows = connection.execute("SELECT count(*) FROM read_parquet(?)", [str(target)]).fetchone()[0]
+            finally:
+                connection.close()
+
+        self.assertEqual(recovered["action"], "skipped")
+        self.assertFalse(backup.exists())
+        self.assertEqual(rows, 1)
 
     def test_runner_reads_the_requested_month_partition_only(self) -> None:
         """Fails if monthly matching scans a neighboring AIS month or expects a copied samples table."""
