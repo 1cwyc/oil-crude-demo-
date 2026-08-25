@@ -1,8 +1,8 @@
 # 模块运行与交接索引
 
-本文件帮助另一台电脑上的 Codex 快速确定模块边界。`crude_fleet_loader` 与 `event_density_matcher` 已实现正式 CLI；对密度模块而言，本 PRD/模块文档为权威，具体见当前已批准的 [事件海水密度匹配模块 PRD](superpowers/specs/2026-08-24-event-density-matcher-design.md)。 [数据字典与模块接口规格 v0.2](specs/AIS原油海运网络_数据字典与模块接口规格_v0.2.md) 是更广的总体设计；其中固定密度等描述已被当前已批准设计取代，旧版身份、爬虫和 DWT 预测描述也不适用于当前方案 A。
+本文件帮助另一台电脑上的 Codex 快速确定模块边界。`crude_fleet_loader`、`crude_fleet_matcher`、`draught_state_builder` 与 `event_density_matcher` 已实现正式 CLI；对密度模块而言，本 PRD/模块文档为权威，具体见当前已批准的 [事件海水密度匹配模块 PRD](superpowers/specs/2026-08-24-event-density-matcher-design.md)。 [数据字典与模块接口规格 v0.2](specs/AIS原油海运网络_数据字典与模块接口规格_v0.2.md) 是更广的总体设计；其中固定密度等描述已被当前已批准设计取代，旧版永久身份档案、爬虫和 DWT 预测描述也不适用于当前方案 A。
 
-除 `crude_fleet_loader`、`crude_fleet_matcher` 与 `event_density_matcher` 外，下列增量模块仍为规划中的工作，尚未实现正式入口；特别是 `event_detector_3h`、`voyage_builder`、`country_validation_builder` 仍未实现。实现任一未实现模块前必须检查真实仓库、浏览相关开源实现、编写独立 PRD 并取得用户确认。
+除 `crude_fleet_loader`、`crude_fleet_matcher`、`draught_state_builder` 与 `event_density_matcher` 外，下列增量模块仍为规划中的工作，尚未实现正式入口；特别是 `event_detector_3h`、`voyage_builder`、`country_validation_builder` 仍未实现。实现任一未实现模块前必须检查真实仓库、浏览相关开源实现、编写独立 PRD 并取得用户确认。
 
 ### `crude_fleet_loader`
 
@@ -39,55 +39,26 @@
 
 ### `identity_resolution`
 
-- **Function:** 将 IMO、MMSI 与时间段统一成稳定 `internal_vessel_id`。
-- **Prerequisites:** `schema_gate` 已通过身份相关字段。
-- **Inputs:** `tanker_registry`、`static_shards`。
-- **Fields read:** registry 的 `mmsi`、`is_tanker`、`observed_ship_types`、`ship_type_conflict`、`latest_imo`、`first_static_time_s`、`last_static_time_s`；static 的 `mmsi`、`imo`、`ship_name`、`callsign`、`ship_type`、`receive_time_s`。
-- **Outputs:** `enrichment/vessel_identity`。
-- **Configuration:** 身份有效性和冲突规则配置。
-- **Run entry:** Not implemented; the module requires its own approved PRD before an entry point is added.
-- **Blocking conditions:** 不可解释的 IMO 合并、MMSI 时间重叠或主键重复。
-- **Acceptance:** `internal_vessel_id` 唯一；时间段合法；冲突进入 `identity_qc_mask`。
-- **Downstream consumers:** ChinaPorts、DWT、吃水、事件和航次模块。
+- **Status:** 不实施。方案 A 以 `reference/crude_vessels.crude_vessel_id` 为唯一物理身份，不建立永久 alias 档案或人工复核系统。
 
 ### `chinaports_labeling`
 
-- **Function:** 通过合规网页爬虫获取船长、船宽和 DWT 训练标签，并保留响应溯源。
-- **Prerequisites:** `vessel_identity`；目标公开页面允许访问；未遇到登录、验证码或访问控制绕过需求。
-- **Inputs:** `enrichment/vessel_identity` 中的 `internal_vessel_id`、`canonical_imo`、`primary_mmsi`。
-- **Fields read:** 页面实际可见的 IMO、MMSI、船名、船长、船宽和 DWT；页面选择器须在执行电脑实测后冻结。
-- **Outputs:** `chinaports_query_state`、`chinaports_raw_index`、`vessel_particulars_observed`。
-- **Configuration:** Scrapy 并发、AutoThrottle、Retry、HTTP cache、JOBDIR、请求间隔和解析器版本。
-- **Run entry:** Not implemented; the module requires its own approved PRD before an entry point is added. 页面选择器和可用字段还必须在执行电脑观察公开页面后校准。
-- **Blocking conditions:** 页面 schema 改变、身份不一致、访问限制或来源条款不允许抓取。
-- **Acceptance:** 可断点恢复；成功任务不重复请求；字段冲突可回查到 `response_id`。
-- **Downstream consumers:** `dwt_classification`、`voyage_builder`。
+- **Status:** 不实施。第一版不使用 ChinaPorts/VesselFinder 爬虫、代理、账号或访问限制绕过。
 
 ### `dwt_classification`
 
-- **Function:** 使用观测 DWT 标签和船舶尺度训练并预测七级 DWT 类别。
-- **Prerequisites:** 可用的 `vessel_particulars_observed` 标签和尺度。
-- **Inputs:** ChinaPorts 船舶参数观测表。
-- **Fields read:** `internal_vessel_id`、`length_m_observed`、`breadth_m_observed`、`deadweight_t_observed`、`field_qc_mask`、`response_id`。
-- **Outputs:** `models/dwt_training_dataset`、`models/dwt_class_predictions` 和独立评估报告。
-- **Configuration:** `configs/dwt/dwt_classes.yaml`；模型选择和交叉验证配置。
-- **Run entry:** Not implemented; the module requires its own approved PRD before an entry point is added.
-- **Blocking conditions:** 标签单位或尺度异常、类别边界不一致、训练与推断特征漂移。
-- **Acceptance:** 报告各类 precision/recall/F1、宏平均 F1、相邻等级错误率和外推数；逐船表只保存最终等级和方法。
-- **Downstream consumers:** `voyage_builder` 和 SCPC 计算。
+- **Status:** 不实施。DWT 仅用于从固定等级配置查找 Cb；不开发七分类或连续 DWT 预测模型。
 
 ### `draught_state_builder`
 
-- **Function:** 清洗时变静态吃水并构建不重叠的稳定吃水状态。
-- **Prerequisites:** `vessel_identity`；static schema 通过。
-- **Inputs:** `static_shards`、`vessel_identity`。
-- **Fields read:** `mmsi`、`imo`、`receive_time_s`、`draught_m`、`dq_mask`、`source_file`、`line_number` 和身份映射字段。
-- **Outputs:** `draught_observations_clean`、`draught_states`。
-- **Configuration:** `configs/draught/draught_rules.yaml`。
-- **Run entry:** Not implemented; the module requires its own approved PRD before an entry point is added.
-- **Blocking conditions:** 关键来源字段缺失、同船时间逻辑错误或状态区间重叠。
-- **Acceptance:** 清洗值可回查原记录；同船状态不重叠；质量位含义固定。
-- **Downstream consumers:** `sample_draught_linker`、事件和航次模块。
+- **Function:** 将 static AIS 的原油船有效吃水流式归约为不重叠稳定状态；不写 `draught_observations_clean` 或完整 AIS 副本。
+- **Inputs:** 主机 YAML 的 `reference_path`、`static_root`、`output_root`；权威参考表与 static 分区必须含 IMO/MMSI 和吃水合同字段。
+- **Rules:** 有效 IMO 优先、唯一参考 MMSI 兜底；读数只接受 `(1, 30]` m。状态要求 6 h、至少 3 个观测，连续间隔最多 48 h，段内最大差最多 0.3 m；同船同刻超容差矛盾失败关闭。
+- **Outputs:** `draught/draught_states/year=YYYY/month=MM/draught_states.parquet`，严格仅 `draught_state_id`、`crude_vessel_id`、`state_start_s`、`state_end_s`、`draught_median_m`；运行范围 manifest 位于 `reports/manifests/draught_state_builder_YYYY-MM_YYYY-MM.json`。
+- **Configuration:** `configs/draught/draught.example.yaml`；配置哈希与输入/输出 SHA256 进入 manifest。
+- **Run:** `python -m ais_tanker_pipeline.draught.draught_state_builder --config $env:AIS_DRAUGHT_CONFIG --start-month YYYY-MM --end-month YYYY-MM [--dry-run] [--force]`。
+- **QC:** 以 DuckDB 批读取，不全量加载月度 AIS；字段缺失、类型漂移、无状态、既有不一致产物均失败关闭。
+- **Downstream consumers:** `event_detector_3h`、`voyage_builder`。
 
 ### `sample_draught_linker`
 

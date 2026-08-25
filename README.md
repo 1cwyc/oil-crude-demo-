@@ -18,9 +18,10 @@ POS .dat + 油轮登记 → 油轮位置
 外部已接受装卸事件 + ERA5/WOA23 → event_seawater_density sidecar（event_density_matcher CLI）
 外部原油船单 CSV → reference/crude_vessels（crude_fleet_loader CLI）
 reference/crude_vessels + 三小时 AIS → 最小原油船 sidecar（crude_fleet_matcher CLI）
+reference/crude_vessels + static AIS 吃水 → 稳定吃水状态 sidecar（draught_state_builder CLI）
 ```
 
-`event_density_matcher` 已实现正式 CLI，但它只消费已存在的接受事件表；`event_detector_3h`、`voyage_builder`、`country_validation_builder` 仍未实现。其余下游模块也保持独立 PRD 后实施的边界。
+`event_density_matcher` 与 `draught_state_builder` 已实现正式 CLI；前者只消费已存在的接受事件表，后者不复制 AIS 位置。`event_detector_3h`、`voyage_builder`、`country_validation_builder` 仍未实现。其余下游模块也保持独立 PRD 后实施的边界。
 
 ## 原油船单参考表
 
@@ -43,6 +44,17 @@ reference/crude_vessels + 三小时 AIS → 最小原油船 sidecar（crude_flee
 ```
 
 输出为 `enrichment/crude_fleet_matches/year=YYYY/month=MM/crude_fleet_matches.parquet`；正式 Parquet 严格仅 `mmsi`、`target_time_s`、`crude_vessel_id`、`match_method`。相同输入幂等跳过，冲突失败关闭，人工核查后可使用 `--force`。
+
+## 稳定吃水状态 sidecar
+
+`draught_state_builder` 直接以权威原油船表按有效 IMO 优先、MMSI 兜底关联 static AIS；只消费 `mmsi`、`imo`、`receive_time_s`、`draught_m` 和 `dq_mask`，按 100,000 行 DuckDB 批次流式归约，绝不生成位置或完整样本副本。使用 [配置模板](configs/draught/draught.example.yaml) 在仓库外创建主机 YAML：
+
+```powershell
+& .\.venv\Scripts\python.exe -m ais_tanker_pipeline.draught.draught_state_builder --config $env:AIS_DRAUGHT_CONFIG --start-month 2025-09 --end-month 2025-09 --dry-run
+& .\.venv\Scripts\python.exe -m ais_tanker_pipeline.draught.draught_state_builder --config $env:AIS_DRAUGHT_CONFIG --start-month 2025-09 --end-month 2025-09
+```
+
+输出为 `draught/draught_states/year=YYYY/month=MM/draught_states.parquet`，严格仅 `draught_state_id`、`crude_vessel_id`、`state_start_s`、`state_end_s`、`draught_median_m`；同一运行范围的 manifest 位于 `reports/manifests/`。输入 schema、同船同刻矛盾吃水、已有不一致产物均失败关闭；相同输入幂等跳过，人工核查后可使用 `--force`。
 
 当前流程以 Python、DuckDB 和 Zstandard Parquet 为主。详细算法与限制见 [技术说明](docs/技术说明.md)。
 
