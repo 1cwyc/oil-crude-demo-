@@ -531,7 +531,7 @@ class DraughtArtifactTests(unittest.TestCase):
 
         self.assertEqual(manifest["counts"]["imo_timestamp_conflict_merged_groups"], 1)
         self.assertAlmostEqual(manifest["counts"]["imo_timestamp_conflict_merged_max_spread_m"], 0.6)
-        self.assertEqual(manifest["algorithm_version"], "1.1.1")
+        self.assertEqual(manifest["algorithm_version"], "1.1.2")
 
     def test_publishes_month_state_sidecar_and_skips_identical_inputs(self) -> None:
         """Fails if stable states are not published as a minimal idempotent monthly artifact."""

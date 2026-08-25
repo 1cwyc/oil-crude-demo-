@@ -27,7 +27,7 @@ from ais_tanker_pipeline.artifacts import (
 from ais_tanker_pipeline.draught.config import DraughtConfig, load_draught_config, month_range
 
 
-DRAUGHT_STATE_ALGORITHM_VERSION = "1.1.1"
+DRAUGHT_STATE_ALGORITHM_VERSION = "1.1.2"
 
 
 @dataclass(frozen=True)

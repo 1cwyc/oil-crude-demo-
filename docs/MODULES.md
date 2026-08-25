@@ -55,7 +55,7 @@
 - **Inputs:** 主机 YAML 的 `reference_path`、`static_root`、`output_root`；权威参考表与 static 分区必须含 IMO/MMSI 和吃水合同字段。
 - **Rules:** 有效 IMO 优先、唯一参考 MMSI 兜底；读数只接受 `(1, 30]` m。同一有效 IMO/时刻的全部有效读数取中位数，超过 0.3 m 的归并组仅进入 manifest 汇总；状态要求 6 h、至少 3 个观测，连续间隔最多 48 h，段内最大差最多 0.3 m。
 - **Outputs:** `draught/draught_states/year=YYYY/month=MM/draught_states.parquet`，严格仅 `draught_state_id`、`crude_vessel_id`、`state_start_s`、`state_end_s`、`draught_median_m`；运行范围 manifest 位于 `reports/manifests/draught_state_builder_YYYY-MM_YYYY-MM.json`。
-- **Configuration:** `configs/draught/draught.example.yaml`；算法版本 `1.1.1`、配置哈希与输入/输出 SHA256 进入 manifest。
+- **Configuration:** `configs/draught/draught.example.yaml`；算法版本 `1.1.2`、配置哈希与输入/输出 SHA256 进入 manifest。
 - **Run:** `python -m ais_tanker_pipeline.draught.draught_state_builder --config $env:AIS_DRAUGHT_CONFIG --start-month YYYY-MM --end-month YYYY-MM [--dry-run] [--force]`。
 - **QC:** 以 DuckDB 批读取，不全量加载月度 AIS；同 IMO/时刻超 0.3 m 归并的组数及最大极差写入 manifest；字段缺失、类型漂移、无状态、既有不一致产物均失败关闭。
 - **Downstream consumers:** `event_detector_3h`、`voyage_builder`。
