@@ -12,6 +12,7 @@ import pandas as pd
 import yaml
 
 from ais_tanker_pipeline.draught.config import DraughtConfig, load_draught_config, month_range
+from ais_tanker_pipeline.draught import draught_state_builder
 from ais_tanker_pipeline.draught.draught_state_builder import (
     DraughtObservation,
     build_draught_states,
@@ -126,6 +127,26 @@ class DraughtConfigTests(unittest.TestCase):
 
 
 class DraughtObservationTests(unittest.TestCase):
+    def test_yields_matched_observations_incrementally(self) -> None:
+        """Fails if a monthly AIS query materializes every matched observation before reduction."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reference = root / "reference.parquet"
+            static = root / "static.parquet"
+            write_parquet(reference, [("imo:9424209", "9424209", 111)], ["crude_vessel_id", "imo", "mmsi"])
+            write_parquet(
+                static,
+                [(111, 100, "9424209", 12.0, 0), (111, 200, "9424209", 12.1, 0)],
+                ["mmsi", "receive_time_s", "imo", "draught_m", "dq_mask"],
+            )
+
+            reader = getattr(draught_state_builder, "iter_matched_observations", None)
+            self.assertIsNotNone(reader)
+            observations = reader(reference, [static], valid_range=(1.0, 30.0), tolerance_m=0.30)
+            first = next(observations)
+
+        self.assertEqual((first.crude_vessel_id, first.receive_time_s, first.draught_m), ("imo:9424209", 100, 12.0))
+
     def test_prefers_imo_and_filters_invalid_draught(self) -> None:
         """Fails if a conflicting MMSI can override IMO or zero draught becomes a stable observation."""
         with tempfile.TemporaryDirectory() as temporary:
@@ -175,8 +196,49 @@ class DraughtObservationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "static AIS missing columns: imo"):
                 read_matched_observations(reference, [static], valid_range=(1.0, 30.0), tolerance_m=0.30)
 
+    def test_rejects_non_integral_mmsi_before_matching(self) -> None:
+        """Fails if a text MMSI is implicitly coerced and changes the physical-identity join."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reference = root / "reference.parquet"
+            static = root / "static.parquet"
+            write_parquet(reference, [("imo:9424209", "9424209", 111)], ["crude_vessel_id", "imo", "mmsi"])
+            write_parquet(
+                static,
+                [("111", 100, "9424209", 12.0, 0)],
+                ["mmsi", "receive_time_s", "imo", "draught_m", "dq_mask"],
+            )
+
+            with self.assertRaisesRegex(ValueError, "static AIS wrong types: mmsi"):
+                read_matched_observations(reference, [static], valid_range=(1.0, 30.0), tolerance_m=0.30)
+
 
 class DraughtReducerTests(unittest.TestCase):
+    def test_reduces_ordered_observations_without_requesting_a_global_length(self) -> None:
+        """Fails if the reducer materializes the entire monthly observation stream to sort it."""
+        class OrderedStream:
+            def __init__(self) -> None:
+                self._items = iter(
+                    [
+                        DraughtObservation("imo:9424209", 0, 12.0),
+                        DraughtObservation("imo:9424209", 3 * 3600, 12.1),
+                        DraughtObservation("imo:9424209", 6 * 3600, 12.2),
+                    ]
+                )
+
+            def __iter__(self) -> "OrderedStream":
+                return self
+
+            def __next__(self) -> DraughtObservation:
+                return next(self._items)
+
+            def __length_hint__(self) -> int:
+                raise AssertionError("global materialization is not allowed")
+
+        states = build_draught_states(OrderedStream(), state_config())
+
+        self.assertEqual([(item.state_start_s, item.state_end_s) for item in states], [(0, 6 * 3600)])
+
     def test_publishes_a_six_hour_three_observation_stable_state(self) -> None:
         """Fails if a qualifying stable state is discarded or its median is not preserved."""
         states = build_draught_states(

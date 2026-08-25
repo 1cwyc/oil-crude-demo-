@@ -51,31 +51,64 @@ def _parquet_paths(paths: Iterable[str | Path]) -> tuple[Path, ...]:
 
 
 def _require_columns(connection: duckdb.DuckDBPyConnection, path: Path, required: set[str], label: str) -> None:
-    columns = {row[0] for row in connection.execute("DESCRIBE SELECT * FROM read_parquet(?)", [str(path)]).fetchall()}
+    columns = {row[0]: str(row[1]).upper() for row in connection.execute("DESCRIBE SELECT * FROM read_parquet(?)", [str(path)]).fetchall()}
     missing = sorted(required.difference(columns))
     if missing:
         raise ValueError(f"{label} missing columns: {', '.join(missing)}")
 
 
-def read_matched_observations(
+def _require_column_types(
+    connection: duckdb.DuckDBPyConnection, path: Path, expected: dict[str, set[str]], label: str
+) -> None:
+    """Reject input type drift before it can change a physical-identity join."""
+    columns = {row[0]: str(row[1]).upper() for row in connection.execute("DESCRIBE SELECT * FROM read_parquet(?)", [str(path)]).fetchall()}
+    wrong = sorted(name for name, accepted in expected.items() if columns[name] not in accepted)
+    if wrong:
+        raise ValueError(f"{label} wrong types: {', '.join(wrong)}")
+
+
+def iter_matched_observations(
     reference_path: str | Path,
     static_paths: Iterable[str | Path],
     *,
     valid_range: tuple[float, float],
     tolerance_m: float,
-) -> list[DraughtObservation]:
-    """Read only valid static draught observations matched to crude physical identities."""
+) -> Iterable[DraughtObservation]:
+    """Yield only valid static draught observations in physical-identity/time order."""
     reference = Path(reference_path).resolve()
     static = _parquet_paths(static_paths)
     if not reference.is_file():
         raise ValueError("reference_path must be a Parquet file")
-    connection = duckdb.connect()
-    try:
-        _require_columns(connection, reference, {"crude_vessel_id", "imo", "mmsi"}, "crude fleet reference")
-        for path in static:
-            _require_columns(connection, path, {"mmsi", "receive_time_s", "imo", "draught_m", "dq_mask"}, "static AIS")
-        rows = connection.execute(
-            """
+    def stream() -> Iterable[DraughtObservation]:
+        connection = duckdb.connect()
+        try:
+            _require_columns(connection, reference, {"crude_vessel_id", "imo", "mmsi"}, "crude fleet reference")
+            _require_column_types(
+                connection,
+                reference,
+                {
+                    "crude_vessel_id": {"VARCHAR"},
+                    "imo": {"VARCHAR"},
+                    "mmsi": {"TINYINT", "SMALLINT", "INTEGER", "BIGINT", "UTINYINT", "USMALLINT", "UINTEGER", "UBIGINT"},
+                },
+                "crude fleet reference",
+            )
+            for path in static:
+                _require_columns(connection, path, {"mmsi", "receive_time_s", "imo", "draught_m", "dq_mask"}, "static AIS")
+                _require_column_types(
+                    connection,
+                    path,
+                    {
+                        "mmsi": {"TINYINT", "SMALLINT", "INTEGER", "BIGINT", "UTINYINT", "USMALLINT", "UINTEGER", "UBIGINT"},
+                        "receive_time_s": {"TINYINT", "SMALLINT", "INTEGER", "BIGINT", "UTINYINT", "USMALLINT", "UINTEGER", "UBIGINT"},
+                        "imo": {"VARCHAR"},
+                        "draught_m": {"FLOAT", "DOUBLE", "DECIMAL"},
+                        "dq_mask": {"TINYINT", "SMALLINT", "INTEGER", "BIGINT", "UTINYINT", "USMALLINT", "UINTEGER", "UBIGINT"},
+                    },
+                    "static AIS",
+                )
+            cursor = connection.execute(
+                """
             WITH unique_mmsi AS (
                 SELECT mmsi, min(crude_vessel_id) AS crude_vessel_id
                 FROM read_parquet(?)
@@ -91,22 +124,44 @@ def read_matched_observations(
               AND static.draught_m > ? AND static.draught_m <= ?
             ORDER BY 1, 2, 3
             """,
-            [str(reference), [str(path) for path in static], str(reference), valid_range[0], valid_range[1]],
-        ).fetchall()
-    finally:
-        connection.close()
-    observations: list[DraughtObservation] = []
-    index = 0
-    while index < len(rows):
-        vessel_id, receive_time_s = str(rows[index][0]), int(rows[index][1])
-        values: list[float] = []
-        while index < len(rows) and str(rows[index][0]) == vessel_id and int(rows[index][1]) == receive_time_s:
-            values.append(float(rows[index][2]))
-            index += 1
-        if max(values) - min(values) > tolerance_m:
-            raise ValueError("conflicting draught observations")
-        observations.append(DraughtObservation(vessel_id, receive_time_s, float(median(values))))
-    return observations
+                [str(reference), [str(path) for path in static], str(reference), valid_range[0], valid_range[1]],
+            )
+            vessel_id: str | None = None
+            receive_time_s: int | None = None
+            values: list[float] = []
+            while rows := cursor.fetchmany(100_000):
+                for row in rows:
+                    next_vessel_id, next_receive_time_s, next_draught_m = str(row[0]), int(row[1]), float(row[2])
+                    if vessel_id is not None and (next_vessel_id, next_receive_time_s) != (vessel_id, receive_time_s):
+                        if max(values) - min(values) > tolerance_m:
+                            raise ValueError("conflicting draught observations")
+                        yield DraughtObservation(vessel_id, receive_time_s, float(median(values)))
+                        values = []
+                    vessel_id, receive_time_s = next_vessel_id, next_receive_time_s
+                    values.append(next_draught_m)
+            if vessel_id is not None:
+                if max(values) - min(values) > tolerance_m:
+                    raise ValueError("conflicting draught observations")
+                yield DraughtObservation(vessel_id, receive_time_s, float(median(values)))
+        finally:
+            connection.close()
+
+    return stream()
+
+
+def read_matched_observations(
+    reference_path: str | Path,
+    static_paths: Iterable[str | Path],
+    *,
+    valid_range: tuple[float, float],
+    tolerance_m: float,
+) -> list[DraughtObservation]:
+    """Materialize a small test or diagnostic query of matched observations."""
+    return list(
+        iter_matched_observations(
+            reference_path, static_paths, valid_range=valid_range, tolerance_m=tolerance_m
+        )
+    )
 
 
 def _state_from_segment(segment: list[DraughtObservation], config: DraughtConfig) -> DraughtState | None:
@@ -129,10 +184,14 @@ def _state_from_segment(segment: list[DraughtObservation], config: DraughtConfig
 
 def build_draught_states(observations: Iterable[DraughtObservation], config: DraughtConfig) -> list[DraughtState]:
     """Collapse sorted physical-vessel observations into non-overlapping stable states."""
-    ordered = sorted(observations, key=lambda item: (item.crude_vessel_id, item.receive_time_s, item.draught_m))
     states: list[DraughtState] = []
     segment: list[DraughtObservation] = []
-    for observation in ordered:
+    previous_key: tuple[str, int, float] | None = None
+    for observation in observations:
+        key = (observation.crude_vessel_id, observation.receive_time_s, observation.draught_m)
+        if previous_key is not None and key < previous_key:
+            raise ValueError("draught observations must be ordered by vessel, time, and value")
+        previous_key = key
         if not segment:
             segment.append(observation)
             continue
@@ -205,10 +264,20 @@ def run_draught_state_builder(
         {**file_signature(path), "sha256": sha256_file(path)}
         for path in (config.reference_path, *static_paths)
     ]
-    observations = read_matched_observations(
-        config.reference_path, static_paths, valid_range=config.draught_valid_range_m, tolerance_m=config.state_tolerance_m
+    observation_count = 0
+
+    def counted_observations() -> Iterable[DraughtObservation]:
+        nonlocal observation_count
+        for observation in iter_matched_observations(
+            config.reference_path, static_paths,
+            valid_range=config.draught_valid_range_m, tolerance_m=config.state_tolerance_m,
+        ):
+            observation_count += 1
+            yield observation
+
+    states = build_draught_states(
+        counted_observations(), config
     )
-    states = build_draught_states(observations, config)
     grouped: dict[Path, list[DraughtState]] = {}
     for state in states:
         grouped.setdefault(_target_for_state(config.output_root, state), []).append(state)
@@ -235,7 +304,7 @@ def run_draught_state_builder(
     manifest = {
         "status": "complete", "module_name": "draught_state_builder", "config_hash": config.config_hash,
         "months": list(months), "inputs": inputs, "outputs": outputs,
-        "counts": {"states": len(states), "observations": len(observations)},
+        "counts": {"states": len(states), "observations": observation_count},
     }
     write_json_atomic(manifest_path, manifest)
     return {"action": "built", "output_paths": [str(path) for path in targets], "manifest_path": str(manifest_path), "counts": manifest["counts"]}
