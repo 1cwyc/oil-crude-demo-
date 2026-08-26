@@ -58,7 +58,7 @@ Each numbered task is a separate branch/PR. Task 1 starts from `origin/feat/geo-
 
 - Consumes: `geo/port_zones/port_zones.parquet`, `geo/port_reference/port_reference.parquet`, versioned China-group rules, overseas functional-area rules.
 - Produces: `build_zone_node_map(config: NodeMappingConfig, *, force: bool, dry_run: bool) -> dict[str, object]`.
-- Writes: `geo/zone_node_map/zone_node_map.parquet` with exactly `zone_id`, `node_id`, `mapping_method`; updates/reuses `geo/network_nodes/network_nodes.parquet` only through a staged, jointly validated publication.
+- Writes: `network_v1/geo/zone_node_map/zone_node_map.parquet` with exactly `zone_id`, `node_id`, `mapping_method` and `network_v1/geo/network_nodes/network_nodes.parquet`; neither path overwrites existing exploratory geo artifacts.
 
 - [ ] **Step 1: Write the mapping output-contract test**
 

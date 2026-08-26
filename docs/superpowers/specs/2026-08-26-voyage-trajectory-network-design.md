@@ -40,7 +40,7 @@
 
 ### 5.1 区—节点映射前置物
 
-`geo/zone_node_map/zone_node_map.parquet` 必须只含：
+`network_v1/geo/zone_node_map/zone_node_map.parquet` 必须只含：
 
 | 字段 | 类型 | 规则 |
 | --- | --- | --- |
@@ -48,7 +48,7 @@
 | `node_id` | VARCHAR | 非空，引用 `geo/network_nodes` |
 | `mapping_method` | VARCHAR | 固定、版本化的映射方法标识 |
 
-一个有效港区只能映射一个节点。中国四大港口群由批准的边界/配置映射；海外功能区的聚类半径和节点规则必须进入配置哈希。不能在网络模块中临时根据港口距离重新聚类。
+一个有效港区只能映射一个节点。关联节点表为 `network_v1/geo/network_nodes/network_nodes.parquet`。中国四大港口群由批准的边界/配置映射；海外功能区的聚类半径和节点规则必须进入配置哈希。不能在网络模块中临时根据港口距离重新聚类。这两个新路径不覆盖已有探索性节点产物。
 
 ### 5.2 航迹模块输入
 
@@ -63,7 +63,7 @@
 
 - 已接受 `crude_voyages`。
 - 对应的 accepted load/unload events，用于 `port_id -> zone_id -> node_id` 双连接。
-- `port_zones`、权威 `zone_node_map`、`network_nodes`。
+- `geo/port_zones`、权威 `network_v1/geo/zone_node_map`、`network_v1/geo/network_nodes`。
 
 网络月永远取 `unload_end_s` 的 UTC 自然月。月度网络不会从图片、航迹几何或已有探索性边表反推节点映射。
 
