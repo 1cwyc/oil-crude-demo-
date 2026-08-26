@@ -86,12 +86,12 @@
 
 ### `geo_node_mapping_builder`
 
-- **Function:** 以既有 WPI 港区和版本化中国四大港口群/海外聚类规则发布唯一权威的区—节点映射。
-- **Inputs:** `geo/port_reference`、`geo/port_zones` 和 `configs/geo/geo.example.yaml` 的已验证主机副本。
-- **Outputs:** 新目录 `network_v1/geo/network_nodes/network_nodes.parquet` 与 `network_v1/geo/zone_node_map/zone_node_map.parquet`；后者严格仅 `zone_id`、`node_id`、`mapping_method`。
-- **Rules:** 中国港区映射到唯一最近四大港口群，等距失败关闭；海外港区按配置半径作确定性球面聚类。`network_v1` 不覆盖已有探索性节点 Parquet。
-- **Run:** `python -m ais_tanker_pipeline.geo.node_mapping --config $env:AIS_GEO_CONFIG [--dry-run] [--force]`。
-- **Blocking conditions:** 缺少港区/参考表、重复港区、物理范围外坐标、映射缺失、映射引用不存在节点或不一致既有输出。
+- **Function:** 以 period 内 accepted 装卸事件实际引用的 WPI 港区，发布唯一权威的区—节点映射。
+- **Inputs:** `geo/port_reference`、`geo/port_zones`、period 内 completed events 分区和 `configs/geo/node_mapping.example.yaml` 的已验证主机副本。
+- **Outputs:** 新目录 `network_v1/geo/period=.../network_nodes/network_nodes.parquet` 与 `network_v1/geo/period=.../zone_node_map/zone_node_map.parquet`；后者严格仅 `zone_id`、`node_id`、`mapping_method`。
+- **Rules:** 中国港区映射到唯一最近四大港口群，等距失败关闭；海外活跃港区按配置半径作确定性完全链接球面聚类，节点内最大成员间距不得超过半径。`network_v1` 不覆盖已有探索性节点 Parquet，也不覆盖其他 period 的冻结映射。
+- **Run:** `python -m ais_tanker_pipeline.geo.node_mapping --config $env:AIS_NODE_MAPPING_CONFIG --period YYYY-MM|YYYY-MM_YYYY-MM [--dry-run] [--force]`。
+- **Blocking conditions:** 缺少事件/港区/参考表、无 accepted 港口、accepted 港口无港区、重复港区、物理范围外坐标、映射缺失、节点内距离超限、映射引用不存在节点或不一致既有输出。
 - **Downstream consumers:** 月度网络、年度网络和真实 AIS 航迹地图。
 
 ### `event_detector_3h`

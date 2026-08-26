@@ -1,0 +1,8 @@
+output_root: "${AIS_DERIVED_ROOT}"
+events_root: "${AIS_DERIVED_ROOT}/events/loading_unloading_events"
+overseas_cluster_radius_km: 250
+china_groups:
+  cn_bohai_rim: [120.0, 38.5]
+  cn_yangtze_delta: [121.3, 31.2]
+  cn_southeast_coast: [118.6, 24.7]
+  cn_pearl_river_delta: [113.7, 22.6]

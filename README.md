@@ -25,11 +25,11 @@ reference/crude_vessels + static AIS 吃水 → 稳定吃水状态 sidecar（dra
 
 ## 网络节点映射
 
-`geo_node_mapping_builder` 从既有 WPI 港区发布不覆盖旧产物的 `network_v1/geo/network_nodes` 与 `network_v1/geo/zone_node_map`。中国港区映射到四大港口群；海外港区使用配置中的球面聚类半径。月度网络只能读取该映射，不能临时按距离重新归类：
+`geo_node_mapping_builder` 从一个明确 UTC period 的 accepted 装卸事件实际引用港口，发布不覆盖旧产物的 `network_v1/geo/period=.../network_nodes` 与 `network_v1/geo/period=.../zone_node_map`。中国港区映射到四大港口群；海外功能区使用配置半径的完全链接球面聚类，任一节点内两港距离都不会超过该半径。月度网络只能读取同一 period 的冻结映射，不能临时按距离重新归类。使用独立的 [配置模板](configs/geo/node_mapping.example.yaml)：
 
 ```powershell
-& .\.venv\Scripts\python.exe -m ais_tanker_pipeline.geo.node_mapping --config $env:AIS_GEO_CONFIG --dry-run
-& .\.venv\Scripts\python.exe -m ais_tanker_pipeline.geo.node_mapping --config $env:AIS_GEO_CONFIG
+& .\.venv\Scripts\python.exe -m ais_tanker_pipeline.geo.node_mapping --config $env:AIS_NODE_MAPPING_CONFIG --period 2025-09 --dry-run
+& .\.venv\Scripts\python.exe -m ais_tanker_pipeline.geo.node_mapping --config $env:AIS_NODE_MAPPING_CONFIG --period 2025-09
 ```
 
 ## 原油船单参考表
@@ -41,7 +41,7 @@ reference/crude_vessels + static AIS 吃水 → 稳定吃水状态 sidecar（dra
 & .\.venv\Scripts\python.exe -m ais_tanker_pipeline.fleet.crude_fleet_loader --config $env:AIS_CRUDE_FLEET_CONFIG
 ```
 
-相同输入会幂等跳过；输入、配置或输出不一致时失败关闭。仅在人工检查既有派生产物后可使用 `--force` 原子重建。
+`2025-09` 仅用于端到端月度验收。待 `2025-07_2026-06` 的全部事件齐备后，必须以该完整研究期重建一份冻结映射，供十二个月网络和年度网络共同使用。相同输入会幂等跳过；输入、配置或输出不一致时失败关闭。仅在人工检查同一 period 的既有派生产物后可使用 `--force` 原子重建。
 
 ## 原油船三小时匹配 sidecar
 
