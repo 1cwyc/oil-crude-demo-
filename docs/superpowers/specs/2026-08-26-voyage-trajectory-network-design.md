@@ -101,21 +101,21 @@
 
 ### 6.3 年度网络
 
-`network_v1/annual_node_flows/year=YYYY/annual_node_flows.parquet` 严格仅：
+`network_v1/annual_node_flows/period=YYYY-MM_YYYY-MM/annual_node_flows.parquet` 严格仅：
 
-`network_year`、`node_id`、`export_cargo_t`、`import_cargo_t`、`export_voyage_count`、`import_voyage_count`。
+`network_period`、`node_id`、`export_cargo_t`、`import_cargo_t`、`export_voyage_count`、`import_voyage_count`。
 
-`network_v1/annual_od_edges/year=YYYY/annual_od_edges.parquet` 严格仅：
+`network_v1/annual_od_edges/period=YYYY-MM_YYYY-MM/annual_od_edges.parquet` 严格仅：
 
-`network_year`、`origin_node_id`、`destination_node_id`、`estimated_cargo_t`、`voyage_count`。
+`network_period`、`origin_node_id`、`destination_node_id`、`estimated_cargo_t`、`voyage_count`。
 
-年度值是十二个指定 UTC 月度表的和；缺少、重复、schema 不一致或月份不属于配置年份时失败关闭。
+年度值是配置中明确列出的连续 12 个 UTC 月度表的和；首个研究年度为 `2025-07_2026-06`。缺少、重复、schema 不一致或月份不属于该配置序列时失败关闭。
 
 ### 6.4 图片
 
-`visualizations/crude_od_network/year=YYYY/month=MM/` 或 `visualizations/crude_od_network/year=YYYY/annual/`：
+`visualizations/crude_od_network/year=YYYY/month=MM/` 或 `visualizations/crude_od_network/period=YYYY-MM_YYYY-MM/`：
 
-- `crude_od_network_YYYY-MM.png` 和 `.pdf`，或 `crude_od_network_YYYY.png` 和 `.pdf`。
+- `crude_od_network_YYYY-MM.png` 和 `.pdf`，或 `crude_od_network_YYYY-MM_YYYY-MM.png` 和 `.pdf`。
 - 伴随 JSON manifest，记录输入 SHA256、配置哈希、Cartopy/Matplotlib 版本、绘制航次数、分段数、节点类别计数和货量范围。
 
 ## 7. 算法与 QC
