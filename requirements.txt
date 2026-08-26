@@ -9,3 +9,7 @@ h5netcdf==1.4.1
 gsw==3.6.19
 PyYAML==6.0.2
 
+
+cartopy==0.24.1
+pyproj==3.7.0
+shapely==2.0.6
