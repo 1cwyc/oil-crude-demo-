@@ -28,7 +28,7 @@
 
 每个模块一个分支和 PR；真实数据和主机 YAML 均在 Git 外。
 
-1. `geo_node_mapping_builder`：在已批准的港区/节点语义下发布权威 `zone_node_map`。这是月度网络的阻断前置条件。
+1. `geo_node_mapping_builder`：以研究期内实际发生 accepted 装卸事件的港口集合，一次性冻结权威 `zone_node_map`。这是月度网络的阻断前置条件。
 2. `voyage_trajectory_builder`：发布实际三小时 AIS 航迹点和最小轨迹 QC。
 3. `monthly_network_builder`：发布唯一的版本化月度节点流和 OD 边表。
 4. `annual_network_builder`：仅在十二个完整月度网络存在时汇总年度节点流和 OD 边表。
@@ -40,7 +40,7 @@
 
 ### 5.1 区—节点映射前置物
 
-`network_v1/geo/zone_node_map/zone_node_map.parquet` 必须只含：
+`network_v1/geo/period=YYYY-MM`（月度验证）或 `network_v1/geo/period=YYYY-MM_YYYY-MM`（完整研究期）下的 `zone_node_map/zone_node_map.parquet` 必须只含：
 
 | 字段 | 类型 | 规则 |
 | --- | --- | --- |
@@ -48,7 +48,9 @@
 | `node_id` | VARCHAR | 非空，引用 `geo/network_nodes` |
 | `mapping_method` | VARCHAR | 固定、版本化的映射方法标识 |
 
-一个有效港区只能映射一个节点。关联节点表为 `network_v1/geo/network_nodes/network_nodes.parquet`。中国四大港口群由批准的边界/配置映射；海外功能区的聚类半径和节点规则必须进入配置哈希。不能在网络模块中临时根据港口距离重新聚类。这两个新路径不覆盖已有探索性节点产物。
+一个有效港区只能映射一个节点。关联节点表位于同一 `period=` 目录。中国四大港口群由批准的边界/配置映射；海外功能区仅从该 period 内 `accepted` 装卸事件实际引用的港口构建。其聚类半径、确定性完全链接规则（同一节点内任意两港球面距离均不超过半径）和 period 都必须进入配置哈希。不能在网络模块中临时根据港口距离重新聚类。
+
+单链式“任意相邻港口即可连通”的聚类不允许使用：它会沿连续海岸把相隔数百至上千公里的港口错误合并。`2025-09` 的映射只服务端到端月度验收；待 `2025-07_2026-06` 的十二个月事件完整后，按完整研究期活跃港口重新生成并冻结正式映射，所有十二个月网络和年度网络均引用同一冻结版本。
 
 ### 5.2 航迹模块输入
 
@@ -63,7 +65,7 @@
 
 - 已接受 `crude_voyages`。
 - 对应的 accepted load/unload events，用于 `port_id -> zone_id -> node_id` 双连接。
-- `geo/port_zones`、权威 `network_v1/geo/zone_node_map`、`network_v1/geo/network_nodes`。
+- `geo/port_zones`、与网络 period 相同的权威 `network_v1/geo/period=.../zone_node_map`、`network_v1/geo/period=.../network_nodes`。
 
 网络月永远取 `unload_end_s` 的 UTC 自然月。月度网络不会从图片、航迹几何或已有探索性边表反推节点映射。
 
@@ -162,7 +164,7 @@
 
 ### 2025-09 真实验收
 
-1. 预检只读验证 30 个完成态三小时样本分区、fleet match、events、voyages 和权威 zone-node map。
+1. 预检只读验证 30 个完成态三小时样本分区、fleet match、events、voyages 和 `2025-09` 活跃港口冻结的权威 zone-node map；每一个海外节点的最大成员间距不得超过配置半径。
 2. 生成实际轨迹点/QC；验证 631 条航次均有真实点、轨迹点数与 QC 一致、没有人造点。
 3. 生成新的月度网络；验证 OD 和节点流货量守恒、节点 ID 都可引用、输入航次数与输出 voyage_count 守恒。
 4. 生成 300 DPI PNG/PDF；人工核验中国为蓝、净出口为红、净进口为绿、边为真实 AIS 分段且无经纬度调试轴。

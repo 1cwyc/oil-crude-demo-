@@ -25,8 +25,8 @@
 
 ## File Map
 
-- `ais_tanker_pipeline/geo/node_mapping.py`: deterministic zone-to-network-node mapping and publication.
-- `ais_tanker_pipeline/geo/node_mapping_config.py`: strict YAML contract for mapping rules.
+- `ais_tanker_pipeline/geo/node_mapping.py`: deterministic, period-scoped active-port zone-to-network-node mapping and publication.
+- `ais_tanker_pipeline/geo/node_mapping_config.py`: strict YAML contract for active-event discovery and mapping rules.
 - `ais_tanker_pipeline/routes/voyage_trajectory_builder.py`: DuckDB extraction of actual trajectory points and QC.
 - `ais_tanker_pipeline/routes/config.py`: strict trajectory YAML contract.
 - `ais_tanker_pipeline/network/monthly_network_builder.py`: build monthly node flow and OD edge artifacts.
@@ -56,9 +56,9 @@ Each numbered task is a separate branch/PR. Task 1 starts from `origin/feat/geo-
 
 **Interfaces:**
 
-- Consumes: `geo/port_zones/port_zones.parquet`, `geo/port_reference/port_reference.parquet`, versioned China-group rules, overseas functional-area rules.
+- Consumes: `geo/port_zones/port_zones.parquet`, `geo/port_reference/port_reference.parquet`, period-scoped accepted events, versioned China-group rules and overseas functional-area rules.
 - Produces: `build_zone_node_map(config: NodeMappingConfig, *, force: bool, dry_run: bool) -> dict[str, object]`.
-- Writes: `network_v1/geo/zone_node_map/zone_node_map.parquet` with exactly `zone_id`, `node_id`, `mapping_method` and `network_v1/geo/network_nodes/network_nodes.parquet`; neither path overwrites existing exploratory geo artifacts.
+- Writes: `network_v1/geo/period=.../zone_node_map/zone_node_map.parquet` with exactly `zone_id`, `node_id`, `mapping_method` and `network_v1/geo/period=.../network_nodes/network_nodes.parquet`; neither path overwrites existing exploratory geo artifacts or a different period's frozen authority.
 
 - [ ] **Step 1: Write the mapping output-contract test**
 
@@ -98,7 +98,7 @@ def assign_node_id(port: PortRecord, config: NodeMappingConfig) -> tuple[str, st
     return overseas_cluster_id(port, config), "overseas_radius_cluster"
 ```
 
-Use a deterministic, antimeridian-safe haversine clustering order based on `port_id`; reject nonfinite coordinates, duplicate zones, a zone mapped twice, or output node IDs missing from the staged node table.
+Use a deterministic, antimeridian-safe greedy complete-linkage clustering order based on `port_id`: a port can join a cluster only when it is no farther than the configured radius from every existing member. Discover ports only from accepted events in the selected period; reject nonfinite coordinates, duplicate zones, a zone mapped twice, an active event port without a zone, or output node IDs missing from the staged node table. Record the largest overseas-cluster diameter in the manifest and reject a diameter over the configured radius.
 
 - [ ] **Step 4: Add red tests for ambiguous Chinese assignment and altered output**
 
