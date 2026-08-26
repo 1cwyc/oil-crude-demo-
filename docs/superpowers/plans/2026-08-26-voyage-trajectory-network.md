@@ -40,7 +40,7 @@
 
 ## Execution Order
 
-Each numbered task is a separate branch/PR. Start every branch from current `origin/main` plus the already merged predecessor PR; never code directly on this design branch.
+Each numbered task is a separate branch/PR. Task 1 starts from `origin/feat/geo-registry-builder`, its required code predecessor; every later task starts from current `origin/main` plus the already merged predecessor PR. Never code directly on this design branch.
 
 ### Task 1: Publish the Authority `zone_node_map`
 
