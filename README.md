@@ -23,6 +23,15 @@ reference/crude_vessels + static AIS 吃水 → 稳定吃水状态 sidecar（dra
 
 `event_density_matcher` 与 `draught_state_builder` 已实现正式 CLI；前者只消费已存在的接受事件表，后者不复制 AIS 位置。`event_detector_3h`、`voyage_builder`、`country_validation_builder` 仍未实现。其余下游模块也保持独立 PRD 后实施的边界。
 
+## 网络节点映射
+
+`geo_node_mapping_builder` 从既有 WPI 港区发布不覆盖旧产物的 `network_v1/geo/network_nodes` 与 `network_v1/geo/zone_node_map`。中国港区映射到四大港口群；海外港区使用配置中的球面聚类半径。月度网络只能读取该映射，不能临时按距离重新归类：
+
+```powershell
+& .\.venv\Scripts\python.exe -m ais_tanker_pipeline.geo.node_mapping --config $env:AIS_GEO_CONFIG --dry-run
+& .\.venv\Scripts\python.exe -m ais_tanker_pipeline.geo.node_mapping --config $env:AIS_GEO_CONFIG
+```
+
 ## 原油船单参考表
 
 `crude_fleet_loader` 将外部船单规范化为唯一 IMO 主键的 `reference/crude_vessels`；它不读取或复制 AIS 位置。使用 [配置模板](configs/fleet/crude_fleet.example.yaml) 在仓库外创建主机 YAML：

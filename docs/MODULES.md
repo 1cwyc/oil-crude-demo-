@@ -75,16 +75,24 @@
 
 ### `geo_registry_builder`
 
-- **Function:** 构建港口参考、空间区、唯一正式网络节点和区—节点映射。
+- **Function:** 从许可明确的 WPI 构建港口参考和候选港区；不决定正式网络节点。
 - **Prerequisites:** 已取得许可明确的 WPI、UN/LOCODE、OSM 或人工配置来源。
 - **Inputs:** 外部港口参考、人工 GeoJSON/CSV；可选 AIS 停留簇校准结果。
 - **Fields read:** 来源对象 ID、名称、国家、代码、经纬度、油码头/锚地证据和几何。
-- **Outputs:** `port_reference`、`port_zones`、`network_nodes`、`zone_node_map`。
-- **Configuration:** `configs/geo/port_zones.geojson`、`network_nodes.geojson`、`zone_node_map.csv`。
-- **Run entry:** Not implemented; the module requires its own approved PRD before an entry point is added.
-- **Blocking conditions:** 一个 zone 映射多个正式节点、几何无效或来源许可不清。
-- **Acceptance:** 中国四大港口群和海外功能区唯一；冲突不被静默覆盖。
-- **Downstream consumers:** 事件、航次、网络、国家验证和航路模块。
+- **Outputs:** `geo/port_reference`、`geo/port_zones`。
+- **Configuration:** `configs/geo/geo.example.yaml`。
+- **Run:** `python -m ais_tanker_pipeline.geo.geo_registry_builder --config $env:AIS_GEO_CONFIG`。
+- **Downstream consumers:** `geo_node_mapping_builder`。
+
+### `geo_node_mapping_builder`
+
+- **Function:** 以既有 WPI 港区和版本化中国四大港口群/海外聚类规则发布唯一权威的区—节点映射。
+- **Inputs:** `geo/port_reference`、`geo/port_zones` 和 `configs/geo/geo.example.yaml` 的已验证主机副本。
+- **Outputs:** 新目录 `network_v1/geo/network_nodes/network_nodes.parquet` 与 `network_v1/geo/zone_node_map/zone_node_map.parquet`；后者严格仅 `zone_id`、`node_id`、`mapping_method`。
+- **Rules:** 中国港区映射到唯一最近四大港口群，等距失败关闭；海外港区按配置半径作确定性球面聚类。`network_v1` 不覆盖已有探索性节点 Parquet。
+- **Run:** `python -m ais_tanker_pipeline.geo.node_mapping --config $env:AIS_GEO_CONFIG [--dry-run] [--force]`。
+- **Blocking conditions:** 缺少港区/参考表、重复港区、物理范围外坐标、映射缺失、映射引用不存在节点或不一致既有输出。
+- **Downstream consumers:** 月度网络、年度网络和真实 AIS 航迹地图。
 
 ### `event_detector_3h`
 
