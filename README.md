@@ -32,6 +32,8 @@ reference/crude_vessels + static AIS 吃水 → 稳定吃水状态 sidecar（dra
 & .\.venv\Scripts\python.exe -m ais_tanker_pipeline.geo.node_mapping --config $env:AIS_NODE_MAPPING_CONFIG --period 2025-09
 ```
 
+`2025-09` 仅用于端到端月度验收。待 `2025-07_2026-06` 的全部事件齐备后，必须以该完整研究期重建一份冻结映射，供十二个月网络和年度网络共同使用。相同输入会幂等跳过；输入、配置或输出不一致时失败关闭。仅在人工检查同一 period 的既有派生产物后可使用 `--force` 原子重建。
+
 ## 原油船单参考表
 
 `crude_fleet_loader` 将外部船单规范化为唯一 IMO 主键的 `reference/crude_vessels`；它不读取或复制 AIS 位置。使用 [配置模板](configs/fleet/crude_fleet.example.yaml) 在仓库外创建主机 YAML：
@@ -41,7 +43,7 @@ reference/crude_vessels + static AIS 吃水 → 稳定吃水状态 sidecar（dra
 & .\.venv\Scripts\python.exe -m ais_tanker_pipeline.fleet.crude_fleet_loader --config $env:AIS_CRUDE_FLEET_CONFIG
 ```
 
-`2025-09` 仅用于端到端月度验收。待 `2025-07_2026-06` 的全部事件齐备后，必须以该完整研究期重建一份冻结映射，供十二个月网络和年度网络共同使用。相同输入会幂等跳过；输入、配置或输出不一致时失败关闭。仅在人工检查同一 period 的既有派生产物后可使用 `--force` 原子重建。
+相同输入会幂等跳过；输入、配置或输出不一致时失败关闭。仅在人工检查既有派生产物后可使用 `--force` 原子重建。
 
 ## 原油船三小时匹配 sidecar
 
