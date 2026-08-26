@@ -1,0 +1,6 @@
+output_root: "${AIS_DERIVED_ROOT}"
+voyages_root: "${AIS_DERIVED_ROOT}/voyages/crude_voyages"
+events_root: "${AIS_DERIVED_ROOT}/events/loading_unloading_events"
+samples_root: "${AIS_SAMPLES_ROOT}/timezone=UTC"
+matches_root: "${AIS_DERIVED_ROOT}/enrichment/crude_fleet_matches"
+max_segment_gap_hours: 24

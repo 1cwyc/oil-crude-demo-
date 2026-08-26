@@ -94,6 +94,15 @@
 - **Blocking conditions:** 缺少事件/港区/参考表、无 accepted 港口、accepted 港口无港区、重复港区、物理范围外坐标、映射缺失、节点内距离超限、映射引用不存在节点或不一致既有输出。
 - **Downstream consumers:** 月度网络、年度网络和真实 AIS 航迹地图。
 
+### `voyage_trajectory_builder`
+
+- **Function:** 为 accepted 原油航次发布实际匹配的三小时 AIS 点和最小轨迹 QC；不复制完整位置表、不插值、不画人工连接。
+- **Inputs:** `voyages/crude_voyages`、accepted events、`samples_3h/timezone=UTC` 和 `enrichment/crude_fleet_matches`；航迹窗口可跨月。
+- **Outputs:** `routes/voyage_trajectory_points/year=YYYY/month=MM/voyage_trajectory_points.parquet`，严格仅 `voyage_id`、`point_index`、`target_time_s`、`longitude_deg`、`latitude_deg`；`routes/voyage_trajectory_qc/...` 严格仅 `voyage_id`、`sample_count`、`coverage_fraction`、`max_gap_s`、`route_status`。
+- **Rules:** 仅读取装载完成到卸载开始窗口内的匹配硬有效点；按 UTC 排序。相邻点缺口大于配置值时为 `gapped`；无点/输入覆盖不足为 `no_points`/`window_not_covered`；同一航次同刻多个 AIS 坐标为 `identity_conflict`，不发布该航次点。
+- **Run:** `python -m ais_tanker_pipeline.routes.voyage_trajectory_builder --config $env:AIS_TRAJECTORY_CONFIG --month YYYY-MM [--dry-run] [--force]`。
+- **Downstream consumers:** 真实 AIS 航迹地图。
+
 ### `event_detector_3h`
 
 - **Function:** 以三小时样本为主识别停留、装载和卸载候选，并按规则接受或拒绝。

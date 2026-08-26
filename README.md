@@ -34,6 +34,15 @@ reference/crude_vessels + static AIS 吃水 → 稳定吃水状态 sidecar（dra
 
 `2025-09` 仅用于端到端月度验收。待 `2025-07_2026-06` 的全部事件齐备后，必须以该完整研究期重建一份冻结映射，供十二个月网络和年度网络共同使用。相同输入会幂等跳过；输入、配置或输出不一致时失败关闭。仅在人工检查同一 period 的既有派生产物后可使用 `--force` 原子重建。
 
+## 真实 AIS 航迹
+
+`voyage_trajectory_builder` 只发布已接受航次装载完成到卸载开始时间窗内、已匹配且硬有效的原始三小时 AIS 坐标；不插值、不补港口连接线、也不扫描全分辨率位置。它写出最小航迹点 sidecar 和每航次 QC；同一物理航次时刻存在多个 MMSI 坐标时标记 `identity_conflict` 并不绘制该航次，避免伪造真实路线。使用 [配置模板](configs/routes/voyage_trajectory.example.yaml)：
+
+```powershell
+& .\.venv\Scripts\python.exe -m ais_tanker_pipeline.routes.voyage_trajectory_builder --config $env:AIS_TRAJECTORY_CONFIG --month 2025-09 --dry-run
+& .\.venv\Scripts\python.exe -m ais_tanker_pipeline.routes.voyage_trajectory_builder --config $env:AIS_TRAJECTORY_CONFIG --month 2025-09
+```
+
 ## 原油船单参考表
 
 `crude_fleet_loader` 将外部船单规范化为唯一 IMO 主键的 `reference/crude_vessels`；它不读取或复制 AIS 位置。使用 [配置模板](configs/fleet/crude_fleet.example.yaml) 在仓库外创建主机 YAML：
